@@ -1,0 +1,8 @@
+# hasil pack Chrome
+*.crx
+*.pem
+
+# artefak lingkungan
+node_modules/
+.DS_Store
+Thumbs.db

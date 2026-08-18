@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>StreamGrab</title>
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <span class="dot"></span>
+        <span>StreamGrab</span>
+      </div>
+      <div class="bar-actions">
+        <button id="btn-scan" class="ghost" title="Paksa pindai ulang halaman">Pindai</button>
+        <button id="btn-play" class="ghost" title="Mainkan video agar stream terungkap">Putar</button>
+        <button id="btn-clear" class="ghost" title="Kosongkan daftar">Bersihkan</button>
+      </div>
+    </header>
+
+    <p id="page-host" class="page-host"></p>
+
+    <section id="preview" class="preview"></section>
+
+    <section id="media" class="list" aria-live="polite"></section>
+
+    <section id="diag" class="diag"></section>
+
+    <section id="jobs-wrap" class="jobs hidden">
+      <div class="jobs-head">
+        <h2>Unduhan</h2>
+        <button id="btn-clear-jobs" class="ghost small">Bersihkan selesai</button>
+      </div>
+      <div id="jobs" class="list"></div>
+    </section>
+
+    <footer class="foot">
+      <label class="conc">
+        Koneksi
+        <input id="conc" type="number" min="1" max="16" step="1" />
+      </label>
+      <span class="hint">Batas koneksi paralel. Naik otomatis selama laju masih ikut naik; turunkan bila server menolak.</span>
+      <button id="btn-diag" class="ghost small" title="Tampilkan apa yang dilihat engine di halaman ini">Diagnostik</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
