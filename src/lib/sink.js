@@ -104,8 +104,12 @@ export class OpfsSink {
     await this.tail;
     await this.stream.close();
     const file = await this.handle.getFile();
+    // File hasil OPFS tidak selalu membawa tipe MIME. Kalau diserahkan begitu
+    // saja ke chrome.downloads, Chrome tidak tahu ini video dan menyimpannya
+    // sebagai .txt — jadi tipenya harus dipasang eksplisit.
+    const blob = this.mime && file.type !== this.mime ? new Blob([file], { type: this.mime }) : file;
     return {
-      blob: file,
+      blob,
       size: file.size,
       cleanup: async () => {
         try {
@@ -131,6 +135,41 @@ export class OpfsSink {
   }
 }
 
+/**
+ * Job yang mati di tengah jalan meninggalkan berkas sementara di OPFS.
+ * Disapu saat mesin unduhan dimuat; yang baru disentuh dilewati agar tidak
+ * mengganggu unduhan yang mungkin sedang berjalan.
+ */
+export async function sweepOpfs(maxAgeMs = 2 * 60 * 60 * 1000) {
+  if (!opfsAvailable()) return 0;
+  let removed = 0;
+  try {
+    const root = await navigator.storage.getDirectory();
+    const dir = await root.getDirectoryHandle('streamgrab', { create: false });
+    const stale = [];
+    for await (const [name, handle] of dir.entries()) {
+      if (handle.kind !== 'file') continue;
+      try {
+        const file = await handle.getFile();
+        if (Date.now() - file.lastModified > maxAgeMs) stale.push(name);
+      } catch {
+        stale.push(name);
+      }
+    }
+    for (const name of stale) {
+      try {
+        await dir.removeEntry(name);
+        removed++;
+      } catch {
+        /* sedang dipakai */
+      }
+    }
+  } catch {
+    /* direktori belum ada */
+  }
+  return removed;
+}
+
 export function opfsAvailable() {
   return typeof navigator !== 'undefined' && typeof navigator.storage?.getDirectory === 'function';
 }
@@ -142,7 +181,7 @@ export async function createSink(opts = {}) {
   const { mime = 'application/octet-stream', name, preferDisk = true } = opts;
   if (preferDisk && opfsAvailable()) {
     try {
-      return await OpfsSink.create(name || `sg-${Date.now()}-${Math.random().toString(36).slice(2)}.part`, mime);
+      return await OpfsSink.create(name || `sg-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`, mime);
     } catch {
       /* jatuh ke memori */
     }

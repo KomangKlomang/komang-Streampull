@@ -2,6 +2,12 @@
 // Service worker boleh mati; dokumen ini tetap hidup sampai job selesai.
 
 import { downloadFile, downloadHls } from '../lib/downloader.js';
+import { sweepOpfs } from '../lib/sink.js';
+
+// Berkas sisa job yang gagal tidak boleh menumpuk di disk selamanya.
+void sweepOpfs().then((n) => {
+  if (n) console.info('[StreamGrab] membersihkan', n, 'berkas sementara');
+});
 
 /** @type {Map<string, AbortController>} */
 const running = new Map();

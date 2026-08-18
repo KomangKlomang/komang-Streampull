@@ -100,7 +100,7 @@ export async function downloadHls(job) {
   }
 
   const { ext, mime } = outputFormat(playlist);
-  const sink = await sinkFactory({ mime, name: `hls-${Date.now()}.part` });
+  const sink = await sinkFactory({ mime, name: `hls-${Date.now()}.${ext}` });
   const segments = playlist.segments;
   const total = segments.length;
 
@@ -222,7 +222,8 @@ export async function downloadFile(job) {
   } = job;
 
   const ext = pathExt(url) || 'mp4';
-  const sink = await sinkFactory({ mime: 'video/mp4', name: `file-${Date.now()}.part` });
+  const mime = ext === 'webm' ? 'video/webm' : ext === 'mkv' ? 'video/x-matroska' : 'video/mp4';
+  const sink = await sinkFactory({ mime, name: `file-${Date.now()}.${ext}` });
 
   const warnings = [];
   const stats = await downloadRanged({

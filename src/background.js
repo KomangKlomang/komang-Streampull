@@ -715,10 +715,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         job.blobUrl = msg.blobUrl;
         job.warnings = msg.warnings || [];
         job.progress = { ...job.progress, bytes: msg.bytes };
+        // Ekstensi tidak boleh kosong: Chrome akan menebak dari tipe MIME dan
+        // bisa menyimpannya sebagai .txt.
+        const ext = /^[a-z0-9]{2,5}$/i.test(msg.ext || '') ? msg.ext : 'mp4';
+        const base = job.nameBase.replace(new RegExp('\.' + ext + '$', 'i'), '');
         try {
           job.downloadId = await chrome.downloads.download({
             url: msg.blobUrl,
-            filename: `StreamGrab/${job.nameBase}.${msg.ext}`,
+            filename: `StreamGrab/${base}.${ext}`,
             saveAs: false,
             conflictAction: 'uniquify',
           });

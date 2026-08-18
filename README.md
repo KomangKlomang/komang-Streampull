@@ -226,6 +226,20 @@ yang tidak ditangani extension:
 
 ---
 
+## Menjalankan tes
+
+```bash
+node tests/run.mjs
+```
+
+Tanpa dependensi. Tambahkan nama suite untuk menjalankan sebagiannya saja:
+`node tests/run.mjs sink`.
+
+Suite `sink` memakai tiruan OPFS di `tests/helpers/fake-opfs.mjs`. Ini penting:
+Node tidak punya OPFS, jadi tanpa tiruan itu `OpfsSink` tidak pernah teruji sama
+sekali — dan di jalur itulah bug tersimpannya video sebagai `.txt` bersembunyi
+(File hasil OPFS tidak membawa tipe MIME, lalu Chrome menebaknya sendiri).
+
 ## Struktur berkas
 
 ```
