@@ -4,5 +4,12 @@
 
 # artefak lingkungan
 node_modules/
+.output/
+.wxt/
+graphify-out/
+GRAB Video/
+dev/.cache/
+package/
+*.tgz
 .DS_Store
 Thumbs.db

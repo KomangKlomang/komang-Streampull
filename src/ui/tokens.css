@@ -1,0 +1,27 @@
+/* StreamGrab design tokens — vanilla CSS, Chromium popup/options safe */
+:root {
+  color-scheme: dark;
+  --sg-bg: #0b1220;
+  --sg-surface: #111827;
+  --sg-surface-2: #1f2937;
+  --sg-border: #334155;
+  --sg-text: #f8fafc;
+  --sg-muted: #94a3b8;
+  --sg-accent: #6366f1;
+  --sg-accent-hover: #818cf8;
+  --sg-ok: #22c55e;
+  --sg-warn: #f59e0b;
+  --sg-err: #ef4444;
+  --sg-radius: 8px;
+  --sg-radius-sm: 6px;
+  --sg-shadow: 0 1px 0 rgb(255 255 255 / 0.04), 0 8px 24px rgb(0 0 0 / 0.35);
+  --sg-focus: 0 0 0 2px var(--sg-bg), 0 0 0 4px var(--sg-accent);
+  --sg-font: system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -7,16 +7,25 @@ import {
   kindFromContentType,
   kindFromUrl,
   originOf,
+  downloadPath,
+  sanitizeDownloadFolder,
   sanitizeFilename,
+  ensureExtension,
   SEGMENT_URL_RE,
   shortHash,
 } from './lib/util.js';
 
 const SETTINGS_DEFAULT = {
   concurrency: 6,
-  minFileSize: 200 * 1024, // abaikan mp4 mungil (biasanya iklan/preview)
+  minFileSize: 200 * 1024,
   keepPerTab: 60,
+  downloadFolder: 'StreamGrab',
+  askSaveLocation: false,
 };
+
+const HISTORY_MAX = 200;
+/** @type {object[]} */
+let history = [];
 
 /** @type {Map<number, Map<string, object>>} tabId -> (entryId -> entry) */
 const registry = new Map();
@@ -93,10 +102,99 @@ async function loadState() {
     /* storage.session belum siap — abaikan */
   }
   try {
-    const local = await chrome.storage.local.get('settings');
-    settings = { ...SETTINGS_DEFAULT, ...(local.settings || {}) };
+    const local = await chrome.storage.local.get(['settings', 'history']);
+    settings = normalizeSettings(local.settings);
+    history = Array.isArray(local.history) ? local.history : [];
   } catch {
     /* pakai default */
+  }
+}
+
+function normalizeSettings(raw) {
+  const merged = { ...SETTINGS_DEFAULT, ...(raw || {}) };
+  merged.askSaveLocation = raw?.askSaveLocation === true;
+  merged.downloadFolder = sanitizeDownloadFolder(merged.downloadFolder);
+  const n = Number(merged.concurrency);
+  merged.concurrency = Number.isFinite(n) ? Math.max(1, Math.min(16, n)) : SETTINGS_DEFAULT.concurrency;
+  return merged;
+}
+
+function shouldPromptSave() {
+  return settings.askSaveLocation === true;
+}
+
+function downloadFilename(nameBase, ext) {
+  return downloadPath(nameBase, ext, settings.downloadFolder);
+}
+
+/** URL → path relatif (untuk onDeterminingFilename sebelum downloadId ada). */
+const pendingSavePaths = new Map();
+
+function registerSavePath(url, path) {
+  if (url && path) pendingSavePaths.set(url, path);
+}
+
+function resolveSavePath(item) {
+  const pending = pendingSavePaths.get(item.url);
+  if (pending) return pending;
+  for (const job of jobs.values()) {
+    if (job.savedPath && (job.downloadId === item.id || job.blobUrl === item.url || job.url === item.url)) {
+      return job.savedPath;
+    }
+  }
+  return null;
+}
+
+function inferExtFromJob(item) {
+  for (const job of jobs.values()) {
+    if (job.blobUrl === item.url || job.url === item.url || job.downloadId === item.id) {
+      const m = /\.([a-z0-9]{1,5})$/i.exec(job.savedPath || '');
+      if (m) return m[1].toLowerCase();
+      if (job.kind === 'hls') return 'ts';
+      return 'mp4';
+    }
+  }
+  return 'mp4';
+}
+
+/** Simpan ke disk setelah unduhan engine selesai (atau unduhan direct). */
+async function saveToDisk(url, savedPath) {
+  registerSavePath(url, savedPath);
+  const opts = {
+    url,
+    filename: savedPath,
+    conflictAction: 'uniquify',
+  };
+  if (shouldPromptSave()) opts.saveAs = true;
+  try {
+    return await chrome.downloads.download(opts);
+  } finally {
+    /* pending path dibersihkan saat unduhan selesai/gagal */
+  }
+}
+
+function clearPendingSavePath(url) {
+  if (url) pendingSavePaths.delete(url);
+}
+
+async function appendHistory(job) {
+  if (!['done', 'error', 'canceled'].includes(job.status)) return;
+  history.unshift({
+    id: job.id,
+    name: job.nameBase,
+    url: job.url,
+    kind: job.kind,
+    bytes: job.progress?.bytes || job.estimatedBytes || 0,
+    finishedAt: Date.now(),
+    path: job.savedPath || '',
+    status: job.status,
+    error: job.error || '',
+  });
+  if (history.length > HISTORY_MAX) history.length = HISTORY_MAX;
+  try {
+    await chrome.storage.local.set({ history });
+  } catch {
+    /* kuota penuh */
   }
 }
 
@@ -197,22 +295,37 @@ safe('webRequest.onSendHeaders', () =>
   chrome.webRequest.onSendHeaders.addListener(
     memoHeaders,
     { urls: ['<all_urls>'], types: WATCHED_TYPES },
-    ['requestHeaders', 'extraHeaders']
+    ['requestHeaders']
   )
 );
 
 function memoHeaders(d) {
   const host = hostOf(d.url);
   if (!host) return;
-  const rec = {
-    referer: headerValue(d.requestHeaders, 'referer'),
-    origin: headerValue(d.requestHeaders, 'origin'),
-    userAgent: headerValue(d.requestHeaders, 'user-agent'),
-    cookie: headerValue(d.requestHeaders, 'cookie'),
-  };
-  if (!rec.referer && !rec.cookie) return;
+  const referer = headerValue(d.requestHeaders, 'referer');
+  const origin = headerValue(d.requestHeaders, 'origin');
+  const userAgent = headerValue(d.requestHeaders, 'user-agent');
+  let cookie = headerValue(d.requestHeaders, 'cookie');
+  if (!referer && !cookie) return;
+
+  const rec = { referer, origin, userAgent, cookie };
   headerMemo.set(host, rec);
   schedulePersist();
+
+  // MV3 tidak mendukung extraHeaders — ambil Cookie lewat chrome.cookies API.
+  if (!cookie) {
+    chrome.cookies
+      .getAll({ url: d.url })
+      .then((cookies) => {
+        if (!cookies.length) return;
+        const existing = headerMemo.get(host);
+        if (existing && !existing.cookie) {
+          existing.cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+          schedulePersist();
+        }
+      })
+      .catch(() => {});
+  }
 }
 
 // Permintaan yang lahir di dalam Worker/SharedWorker/service worker sering
@@ -456,9 +569,25 @@ function headersFor(entry, targetUrl = entry.url) {
   };
 }
 
+/** Lengkapi Cookie dari chrome.cookies bila webRequest tidak menyediakannya (MV3). */
+async function headersForDownload(entry, targetUrl = entry.url) {
+  const headers = headersFor(entry, targetUrl);
+  if (headers.cookie) return headers;
+  try {
+    const cookies = await chrome.cookies.getAll({ url: targetUrl });
+    if (cookies.length) {
+      headers.cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+    }
+  } catch {
+    /* abaikan */
+  }
+  return headers;
+}
+
 // ------------------------------------------------------ offscreen document ---
 
-const OFFSCREEN_PATH = 'src/offscreen/offscreen.html';
+// WXT build → offscreen.html di root; manifest langsung → src/offscreen/offscreen.html
+const OFFSCREEN_PATHS = ['offscreen.html', 'src/offscreen/offscreen.html'];
 let creatingOffscreen = null;
 
 async function ensureOffscreen() {
@@ -470,11 +599,24 @@ async function ensureOffscreen() {
     await creatingOffscreen;
     return;
   }
-  creatingOffscreen = chrome.offscreen.createDocument({
-    url: OFFSCREEN_PATH,
-    reasons: ['BLOBS'],
-    justification: 'Merakit segmen video menjadi satu berkas sebelum disimpan.',
-  });
+
+  creatingOffscreen = (async () => {
+    let lastErr;
+    for (const url of OFFSCREEN_PATHS) {
+      try {
+        await chrome.offscreen.createDocument({
+          url,
+          reasons: ['BLOBS'],
+          justification: 'Merakit segmen video menjadi satu berkas sebelum disimpan.',
+        });
+        return;
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw lastErr || new Error('Tidak bisa membuat dokumen offscreen.');
+  })();
+
   try {
     await creatingOffscreen;
   } finally {
@@ -514,7 +656,7 @@ async function startDownload({ entryId, tabId, variantUrl, label, mode, estimate
   if (!entry) throw new Error('Media tidak ditemukan lagi — muat ulang halaman.');
 
   const targetUrl = variantUrl || entry.url;
-  const headers = headersFor(entry, targetUrl);
+  const headers = await headersForDownload(entry, targetUrl);
   const tab = await chrome.tabs.get(tabId).catch(() => null);
   const base = sanitizeFilename(
     tab?.title || entry.pageTitle || hostOf(entry.frameUrl || entry.url),
@@ -551,14 +693,10 @@ async function startDownload({ entryId, tabId, variantUrl, label, mode, estimate
 async function startDirectDownload(job) {
   job.ruleId = await addHeaderRule(job.url, job.headers);
   const ext = (job.url.match(/\.([a-z0-9]{2,4})(?:$|[?#])/i)?.[1] || 'mp4').toLowerCase();
+  const savedPath = downloadFilename(job.nameBase, ext);
+  job.savedPath = savedPath;
   try {
-    const downloadId = await chrome.downloads.download({
-      url: job.url,
-      filename: `StreamGrab/${job.nameBase}.${ext}`,
-      saveAs: false,
-      conflictAction: 'uniquify',
-    });
-    job.downloadId = downloadId;
+    job.downloadId = await saveToDisk(job.url, savedPath);
     saveJob(job);
   } catch (err) {
     await removeHeaderRule(job.ruleId);
@@ -590,6 +728,19 @@ async function startEngineDownload(job) {
   saveJob(job);
 }
 
+safe('downloads.onDeterminingFilename', () =>
+  chrome.downloads.onDeterminingFilename.addListener((item, suggest) => {
+    const path = resolveSavePath(item);
+    if (path) {
+      suggest({ filename: ensureExtension(path), conflictAction: 'uniquify' });
+      return;
+    }
+    const ext = inferExtFromJob(item);
+    const fallback = ensureExtension(item.filename || `${settings.downloadFolder}/video`, ext);
+    suggest({ filename: fallback, conflictAction: 'uniquify' });
+  })
+);
+
 safe('downloads.onChanged', () =>
   chrome.downloads.onChanged.addListener(async (delta) => {
     const job = [...jobs.values()].find((j) => j.downloadId === delta.id);
@@ -597,13 +748,23 @@ safe('downloads.onChanged', () =>
     if (delta.state?.current === 'complete') {
       job.status = 'done';
       await removeHeaderRule(job.ruleId);
+      clearPendingSavePath(job.blobUrl || job.url);
       if (job.blobUrl) revokeBlob(job.blobUrl);
       saveJob(job);
+      await appendHistory(job);
     } else if (delta.state?.current === 'interrupted') {
       job.status = 'error';
-      job.error = delta.error?.current || 'Unduhan terputus';
+      job.error = delta.error?.current || 'Unduhan terputus — hapus berkas .crdownload jika ada';
       await removeHeaderRule(job.ruleId);
+      clearPendingSavePath(job.blobUrl || job.url);
       if (job.blobUrl) revokeBlob(job.blobUrl);
+      saveJob(job);
+      await appendHistory(job);
+    } else if (delta.state?.current === 'paused') {
+      job.status = 'paused';
+      saveJob(job);
+    } else if (delta.state?.current === 'in_progress' && job.status === 'paused') {
+      job.status = 'running';
       saveJob(job);
     }
   })
@@ -703,7 +864,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const job = jobs.get(msg.id);
         if (job) {
           job.progress = msg.progress;
-          job.status = 'running';
+          if (msg.paused) job.status = 'paused';
+          else if (job.status !== 'paused' && job.status !== 'saving') job.status = 'running';
           saveJob(job);
         }
         sendResponse({ ok: true });
@@ -711,21 +873,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case 'job-done': {
         const job = jobs.get(msg.id);
-        if (!job) return;
+        if (!job) {
+          sendResponse({ ok: false, error: 'job hilang' });
+          return;
+        }
         job.blobUrl = msg.blobUrl;
         job.warnings = msg.warnings || [];
         job.progress = { ...job.progress, bytes: msg.bytes };
-        // Ekstensi tidak boleh kosong: Chrome akan menebak dari tipe MIME dan
-        // bisa menyimpannya sebagai .txt.
-        const ext = /^[a-z0-9]{2,5}$/i.test(msg.ext || '') ? msg.ext : 'mp4';
-        const base = job.nameBase.replace(new RegExp('\.' + ext + '$', 'i'), '');
+        const ext = /^[a-z0-9]{2,5}$/i.test(msg.ext || '') ? msg.ext.toLowerCase() : 'mp4';
+        const savedPath = downloadFilename(job.nameBase, ext);
+        job.savedPath = savedPath;
+        saveJob(job);
         try {
-          job.downloadId = await chrome.downloads.download({
-            url: msg.blobUrl,
-            filename: `StreamGrab/${base}.${ext}`,
-            saveAs: false,
-            conflictAction: 'uniquify',
-          });
+          job.downloadId = await saveToDisk(msg.blobUrl, savedPath);
           job.status = 'saving';
         } catch (err) {
           job.status = 'error';
@@ -744,6 +904,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           job.error = msg.error;
           await removeHeaderRule(job.ruleId);
           saveJob(job);
+          await appendHistory(job);
         }
         sendResponse({ ok: true });
         return;
@@ -767,6 +928,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           media: list,
           jobs: [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt).slice(0, 20),
           settings,
+          history: history.slice(0, 50),
           startupErrors,
           thumb: thumbs.get(tabId) || null,
         });
@@ -776,7 +938,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const entry = registry.get(msg.tabId)?.get(msg.entryId);
           if (!entry) throw new Error('Entri tidak ditemukan.');
-          const headers = headersFor(entry);
+          const headers = await headersForDownload(entry);
           const ruleId = await addHeaderRule(entry.url, headers);
           try {
             const text = await fetchText(entry.url, { retries: 2 });
@@ -878,7 +1040,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sendResponse({ ok: false, error: 'Entri tidak ditemukan.' });
           return;
         }
-        const headers = headersFor(entry);
+        const headers = await headersForDownload(entry);
         const ruleId = await addHeaderRule(entry.url, headers);
         try {
           const res = await fetch(entry.url, {
@@ -932,7 +1094,44 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           job.status = 'canceled';
           await removeHeaderRule(job.ruleId);
           saveJob(job);
+          await appendHistory(job);
         }
+        sendResponse({ ok: true });
+        return;
+      }
+      case 'pause': {
+        const job = jobs.get(msg.jobId);
+        if (job && (job.status === 'running' || job.status === 'saving')) {
+          if (job.downloadId != null) {
+            await chrome.downloads.pause(job.downloadId).catch(() => {});
+            job.status = 'paused';
+          } else if (job.mode === 'engine') {
+            await sendToOffscreen({ target: 'offscreen', cmd: 'pause', id: job.id });
+            job.status = 'paused';
+          }
+          saveJob(job);
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+      case 'resume': {
+        const job = jobs.get(msg.jobId);
+        if (job && job.status === 'paused') {
+          if (job.downloadId != null) {
+            await chrome.downloads.resume(job.downloadId).catch(() => {});
+            job.status = job.blobUrl ? 'saving' : 'running';
+          } else if (job.mode === 'engine') {
+            await sendToOffscreen({ target: 'offscreen', cmd: 'resume', id: job.id });
+            job.status = 'running';
+          }
+          saveJob(job);
+        }
+        sendResponse({ ok: true });
+        return;
+      }
+      case 'clear-history': {
+        history = [];
+        await chrome.storage.local.set({ history: [] });
         sendResponse({ ok: true });
         return;
       }
@@ -961,9 +1160,66 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return;
       }
       case 'settings': {
-        settings = { ...settings, ...msg.patch };
+        const patch = { ...msg.patch };
+        if ('downloadFolder' in patch) {
+          patch.downloadFolder = sanitizeDownloadFolder(patch.downloadFolder);
+        }
+        if ('askSaveLocation' in patch) {
+          patch.askSaveLocation = patch.askSaveLocation === true;
+        }
+        settings = normalizeSettings({ ...settings, ...patch });
         await chrome.storage.local.set({ settings });
         sendResponse({ ok: true, settings });
+        return;
+      }
+      case 'dashboard': {
+        const browserTabs = await chrome.tabs.query({});
+        const tabSummaries = [];
+        for (const t of browserTabs) {
+          if (t.id == null || t.id < 0) continue;
+          const media = [...(registry.get(t.id)?.values() || [])].map((e) => ({
+            id: e.id,
+            kind: e.kind,
+            url: e.url,
+            verified: e.verified,
+            size: e.size,
+            lastSeen: e.lastSeen,
+          }));
+          const d = diagnostics.get(t.id);
+          tabSummaries.push({
+            tabId: t.id,
+            title: t.title,
+            url: t.url,
+            mediaCount: media.length,
+            media,
+            diag: d
+              ? {
+                  responses: d.responses,
+                  recorded: d.recorded,
+                  reasons: d.reasons,
+                  events: d.events,
+                  frames: d.frames,
+                  hooks: d.hooks,
+                }
+              : null,
+          });
+        }
+        let offscreen = false;
+        try {
+          const ctx = await chrome.runtime.getContexts({ contextTypes: ['OFFSCREEN_DOCUMENT'] });
+          offscreen = ctx.length > 0;
+        } catch {
+          /* abaikan */
+        }
+        sendResponse({
+          ok: true,
+          startupErrors: [...startupErrors],
+          settings: { ...settings },
+          jobs: [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt),
+          history: history.slice(0, 100),
+          tabs: tabSummaries,
+          offscreen,
+        });
         return;
       }
       default:
@@ -974,6 +1230,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // respons asinkron
 });
 
-chrome.runtime.onInstalled.addListener(() => {
+chrome.runtime.onInstalled.addListener(async () => {
   chrome.action.setBadgeBackgroundColor({ color: '#6366f1' });
+  try {
+    const local = await chrome.storage.local.get('settings');
+    if (local.settings) {
+      await chrome.storage.local.set({ settings: normalizeSettings(local.settings) });
+      settings = normalizeSettings(local.settings);
+    }
+  } catch {
+    /* abaikan */
+  }
 });

@@ -1,0 +1,17 @@
+{
+  "name": "streamgrab",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wxt",
+    "dev:preview": "node dev/server.mjs",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "postinstall": "wxt prepare",
+    "test": "node tests/run.mjs"
+  },
+  "devDependencies": {
+    "wxt": "^0.21.4"
+  }
+}

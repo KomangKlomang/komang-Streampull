@@ -3,13 +3,13 @@
 
 import { downloadFile, downloadHls } from '../lib/downloader.js';
 import { sweepOpfs } from '../lib/sink.js';
+import { createPauseGate } from '../lib/util.js';
 
-// Berkas sisa job yang gagal tidak boleh menumpuk di disk selamanya.
 void sweepOpfs().then((n) => {
   if (n) console.info('[StreamGrab] membersihkan', n, 'berkas sementara');
 });
 
-/** @type {Map<string, AbortController>} */
+/** @type {Map<string, { ctrl: AbortController, pause: ReturnType<typeof createPauseGate> }>} */
 const running = new Map();
 /** blobUrl -> pembersih file sementara OPFS */
 const cleanups = new Map();
@@ -20,8 +20,12 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.cmd === 'run') {
     void run(msg.job);
   } else if (msg.cmd === 'cancel') {
-    running.get(msg.id)?.abort();
+    running.get(msg.id)?.ctrl.abort();
     running.delete(msg.id);
+  } else if (msg.cmd === 'pause') {
+    running.get(msg.id)?.pause.pause();
+  } else if (msg.cmd === 'resume') {
+    running.get(msg.id)?.pause.resume();
   } else if (msg.cmd === 'revoke') {
     try {
       URL.revokeObjectURL(msg.blobUrl);
@@ -36,20 +40,21 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 function send(payload) {
   chrome.runtime.sendMessage(payload).catch(() => {
-    /* service worker sedang tidur; pesan berikutnya akan membangunkannya */
+    /* service worker sedang tidur */
   });
 }
 
 async function run(job) {
   const ctrl = new AbortController();
-  running.set(job.id, ctrl);
+  const pause = createPauseGate();
+  running.set(job.id, { ctrl, pause });
 
   let lastTick = 0;
   const onProgress = (progress) => {
     const now = Date.now();
     if (now - lastTick < 350) return;
     lastTick = now;
-    send({ type: 'job-progress', id: job.id, progress });
+    send({ type: 'job-progress', id: job.id, progress, paused: pause.paused });
   };
 
   try {
@@ -59,6 +64,7 @@ async function run(job) {
       concurrency: job.concurrency,
       signal: ctrl.signal,
       onProgress,
+      pauseGate: pause,
     });
 
     const blobUrl = URL.createObjectURL(blob);

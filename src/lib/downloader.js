@@ -6,7 +6,7 @@ import { parseM3U8, sortVariants } from './m3u8.js';
 import { fetchBytes, fetchText } from './net.js';
 import { createSink } from './sink.js';
 import { AdaptiveConcurrency, SpeedMeter, etaSeconds } from './speed.js';
-import { hexToBytes, pathExt, sleep } from './util.js';
+import { createPauseGate, hexToBytes, pathExt, sleep } from './util.js';
 
 // ---------------------------------------------------------------- AES-128 ---
 
@@ -76,6 +76,7 @@ export async function downloadHls(job) {
     concurrency = 6,
     onProgress = () => {},
     sinkFactory = createSink,
+    pauseGate = createPauseGate(),
   } = job;
   const warnings = [];
 
@@ -171,6 +172,7 @@ export async function downloadHls(job) {
   const pump = async () => {
     for (;;) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      await pauseGate.wait(signal);
       const i = cursor++;
       if (i >= total) return;
       active++;
@@ -190,6 +192,7 @@ export async function downloadHls(job) {
   const gatedPump = async (index) => {
     while (index >= controller.target) {
       if (signal?.aborted || finished || cursor >= total) return;
+      await pauseGate.wait(signal);
       await sleep(300, signal).catch(() => {});
     }
     return pump();
@@ -219,6 +222,7 @@ export async function downloadFile(job) {
     concurrency = 8,
     onProgress = () => {},
     sinkFactory = createSink,
+    pauseGate = createPauseGate(),
   } = job;
 
   const ext = pathExt(url) || 'mp4';
@@ -232,6 +236,7 @@ export async function downloadFile(job) {
     signal,
     maxConnections: Math.max(1, Math.min(concurrency, 16)),
     onProgress,
+    pauseGate,
   });
   if (!stats.ranged) {
     warnings.push('Server tidak mendukung HTTP Range — unduhan berjalan satu koneksi.');

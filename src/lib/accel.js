@@ -68,6 +68,7 @@ export async function downloadRanged(job) {
     maxConnections = 8,
     minChunkBytes = MIN_CHUNK,
     onProgress = () => {},
+    pauseGate = null,
   } = job;
 
   const meter = new SpeedMeter();
@@ -105,7 +106,7 @@ export async function downloadRanged(job) {
       await singleStream({ url, sink, signal, onBytes: (n) => {
         written += n;
         meter.add(n);
-      } });
+      }, pauseGate });
       activeConnections = 0;
       report();
       return { total: written, connections: 1, peak: 1, ranged: false };
@@ -157,6 +158,7 @@ export async function downloadRanged(job) {
       let attempt = 0;
       while (chunk.pos <= chunk.end) {
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        if (pauseGate) await pauseGate.wait(signal);
         const ctrl = new AbortController();
         const onAbort = () => ctrl.abort();
         signal?.addEventListener('abort', onAbort, { once: true });
@@ -174,6 +176,7 @@ export async function downloadRanged(job) {
           }
           const reader = res.body.getReader();
           for (;;) {
+            if (pauseGate) await pauseGate.wait(signal);
             const { done: finished, value } = await reader.read();
             if (finished) break;
             const room = chunk.end - chunk.pos + 1;
@@ -208,6 +211,7 @@ export async function downloadRanged(job) {
     const pump = async () => {
       for (;;) {
         if (signal?.aborted || done) return;
+        if (pauseGate) await pauseGate.wait(signal);
         const chunk = queue.shift() || steal();
         if (!chunk) return;
         activeConnections++;
@@ -247,7 +251,7 @@ export async function downloadRanged(job) {
   }
 }
 
-async function singleStream({ url, sink, signal, onBytes }) {
+async function singleStream({ url, sink, signal, onBytes, pauseGate = null }) {
   const res = await fetch(url, { credentials: 'include', cache: 'no-store', signal });
   if (!res.ok) throw new Error(`HTTP ${res.status} saat mengambil file.`);
   if (!res.body) {
@@ -258,6 +262,7 @@ async function singleStream({ url, sink, signal, onBytes }) {
   }
   const reader = res.body.getReader();
   for (;;) {
+    if (pauseGate) await pauseGate.wait(signal);
     const { done, value } = await reader.read();
     if (done) break;
     await sink.append(value);

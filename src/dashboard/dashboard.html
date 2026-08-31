@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="id">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="dashboard.css" />
+    <title>StreamGrab Studio</title>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="dot"></span>
+        <h1>StreamGrab Studio</h1>
+        <span id="status-pill" class="pill">Memuat…</span>
+      </div>
+      <div class="top-actions">
+        <button id="btn-refresh" type="button">Refresh</button>
+        <button id="btn-popup" type="button" class="ghost">Buka Popup</button>
+        <button id="btn-ext" type="button" class="ghost">Extension Errors</button>
+      </div>
+    </header>
+
+    <div class="layout">
+      <nav class="sidebar">
+        <button class="nav active" data-panel="problems" type="button">Problems</button>
+        <button class="nav" data-panel="jobs" type="button">Unduhan</button>
+        <button class="nav" data-panel="tabs" type="button">Tab & Media</button>
+        <button class="nav" data-panel="history" type="button">Riwayat</button>
+        <button class="nav" data-panel="settings" type="button">Pengaturan</button>
+        <button class="nav" data-panel="system" type="button">Sistem</button>
+      </nav>
+
+      <main class="main">
+        <section id="panel-problems" class="panel active">
+          <div class="panel-head">
+            <h2>Masalah yang perlu diperbaiki</h2>
+            <span id="problems-count" class="muted"></span>
+          </div>
+          <div id="problems" class="problems"></div>
+        </section>
+
+        <section id="panel-jobs" class="panel">
+          <div class="panel-head"><h2>Unduhan aktif &amp; terbaru</h2></div>
+          <div id="jobs" class="table-wrap"></div>
+        </section>
+
+        <section id="panel-tabs" class="panel">
+          <div class="panel-head"><h2>Tab terbuka &amp; media terdeteksi</h2></div>
+          <div id="tabs" class="tabs-list"></div>
+        </section>
+
+        <section id="panel-history" class="panel">
+          <div class="panel-head"><h2>Riwayat unduhan</h2></div>
+          <div id="history" class="table-wrap"></div>
+        </section>
+
+        <section id="panel-settings" class="panel">
+          <div class="panel-head"><h2>Pengaturan</h2></div>
+          <div id="settings" class="settings-grid"></div>
+        </section>
+
+        <section id="panel-system" class="panel">
+          <div class="panel-head"><h2>Status sistem</h2></div>
+          <div id="system" class="system-grid"></div>
+        </section>
+      </main>
+    </div>
+
+    <footer class="foot">
+      <span id="last-sync" class="muted">—</span>
+      <span class="muted">Auto-refresh 2 detik · seperti panel Problems di Android Studio</span>
+    </footer>
+
+    <script type="module" src="dashboard.js"></script>
+  </body>
+</html>

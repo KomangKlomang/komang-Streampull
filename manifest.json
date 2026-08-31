@@ -8,6 +8,7 @@
   "permissions": [
     "webRequest",
     "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess",
     "storage",
     "downloads",
     "offscreen",
@@ -32,6 +33,11 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
+  },
+
+  "options_ui": {
+    "page": "src/dashboard/dashboard.html",
+    "open_in_tab": true
   },
 
   "icons": {
