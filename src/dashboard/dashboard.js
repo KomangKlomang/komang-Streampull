@@ -128,9 +128,10 @@ function renderSettings(s) {
   const root = $('#settings');
   root.replaceChildren();
   const rows = [
-    ['Folder simpan', s.downloadFolder || 'StreamGrab'],
+    ['Folder simpan', s.downloadFolder || 'KSP'],
     ['Dialog simpan', s.askSaveLocation ? 'Ya' : 'Tidak (otomatis)'],
     ['Koneksi paralel', String(s.concurrency)],
+    ['Unduhan bersamaan', String(s.queueConcurrency ?? 3)],
     ['Min file size', formatBytes(s.minFileSize)],
   ];
   for (const [k, v] of rows) {
@@ -213,6 +214,22 @@ async function refresh() {
   renderSystem(data);
   $('#last-sync').textContent = `Terakhir sync: ${new Date().toLocaleTimeString('id-ID')}`;
 }
+
+function mountLogo() {
+  const box = document.querySelector('.logo-icon');
+  if (!box) return;
+  let img = box.querySelector('img');
+  if (!img) {
+    img = document.createElement('img');
+    img.width = 28;
+    img.height = 28;
+    img.alt = '';
+    box.replaceChildren(img);
+  }
+  img.src = chrome.runtime.getURL('icons/ksp-logo.png');
+}
+
+mountLogo();
 
 for (const btn of document.querySelectorAll('.nav')) {
   btn.addEventListener('click', () => switchPanel(btn.dataset.panel));

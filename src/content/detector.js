@@ -3,9 +3,19 @@
 
 (() => {
   'use strict';
+  if (window.__kspDetector) return;
+  window.__kspDetector = true;
 
   const queue = new Map(); // url -> source
   let flushTimer = null;
+
+  function pageTitle() {
+    return (
+      document.querySelector('meta[property="og:title"]')?.getAttribute('content') ||
+      document.title ||
+      ''
+    );
+  }
 
   function flush() {
     flushTimer = null;
@@ -16,7 +26,7 @@
       chrome.runtime.sendMessage({
         type: 'media-found',
         items,
-        title: document.title || '',
+        title: pageTitle(),
         pageUrl: location.href,
       });
     } catch {
@@ -33,7 +43,7 @@
   window.addEventListener('message', (ev) => {
     if (ev.source !== window) return;
     const data = ev.data;
-    if (!data || data.channel !== 'STREAMGRAB_PAGE') return;
+    if (!data || data.channel !== 'GOVIDEO_PAGE') return;
 
     if (data.status) {
       try {
@@ -58,7 +68,20 @@
       return;
     }
 
-    enqueue(data.url, data.source);
+    if (data.drm) {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'drm-detected',
+          keySystem: data.keySystem || '',
+          pageUrl: location.href,
+        });
+      } catch {
+        /* konteks extension sudah tidak valid */
+      }
+      return;
+    }
+
+    enqueue(data.url, data.source === 'playing' ? 'playing' : data.source);
   });
 
   // Lapor keberadaan frame ini walaupun MAIN world gagal memasang hook.
@@ -68,9 +91,59 @@
     /* konteks extension sudah tidak valid */
   }
 
+  const seenEls = new WeakSet();
+  let moTimer = null;
+
+  function scanDom(root) {
+    const scope = root && root.querySelectorAll ? root : document;
+    const nodes = [];
+    if (root?.matches?.('video, audio, source, iframe')) nodes.push(root);
+    try {
+      nodes.push(...scope.querySelectorAll('video, audio, source'));
+    } catch {
+      return;
+    }
+    for (const el of nodes) {
+      if (seenEls.has(el)) {
+        const src = el.currentSrc || el.src || el.getAttribute?.('src');
+        if (src) enqueue(src, el.paused === false ? 'playing' : 'dom');
+        continue;
+      }
+      seenEls.add(el);
+      const src =
+        el.currentSrc ||
+        el.src ||
+        el.getAttribute?.('src') ||
+        el.getAttribute?.('data-src') ||
+        el.getAttribute?.('data-url');
+      if (src) enqueue(src, !el.paused && el.tagName === 'VIDEO' ? 'playing' : 'dom');
+    }
+  }
+
+  function startObserver() {
+    if (!document.documentElement) return;
+    scanDom(document);
+    const mo = new MutationObserver(() => {
+      if (moTimer) return;
+      moTimer = setTimeout(() => {
+        moTimer = null;
+        scanDom(document);
+      }, 200);
+    });
+    mo.observe(document.documentElement, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['src', 'data-src', 'data-url'],
+    });
+  }
+
+  if (document.documentElement) startObserver();
+  else document.addEventListener('DOMContentLoaded', startObserver, { once: true });
+
   chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.cmd === 'deep-scan' || msg?.cmd === 'force-play' || msg?.cmd === 'capture-thumb') {
-      window.postMessage({ channel: 'STREAMGRAB_CMD', cmd: msg.cmd }, '*');
+      window.postMessage({ channel: 'GOVIDEO_CMD', cmd: msg.cmd }, '*');
       // beri waktu hook.js menyapu, lalu kirimkan hasilnya
       setTimeout(flush, 700);
       sendResponse({ ok: true });

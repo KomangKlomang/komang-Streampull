@@ -1,4 +1,4 @@
-# StreamGrab
+# Komang-streampull (KSP)
 
 Extension Chromium (Manifest V3) untuk **mendeteksi dan mengunduh stream video** dari tab
 yang sedang dibuka — termasuk situs hosting yang memakai player ter-obfuscate,
@@ -12,7 +12,7 @@ di situs mana pun yang menyajikan `.m3u8` atau file video progresif.
 ## Cara kerjanya
 
 Alih-alih membongkar enkripsi/obfuscation JavaScript situs (yang berubah tiap minggu),
-StreamGrab **membiarkan player situs itu sendiri yang membuka URL aslinya**, lalu menangkapnya
+Komang-streampull (KSP) **membiarkan player situs itu sendiri yang membuka URL aslinya**, lalu menangkapnya
 dari tiga arah sekaligus:
 
 | Lapisan | Berkas | Yang ditangkap |
@@ -46,7 +46,7 @@ Situs streaming modern jarang menaruh URL video apa adanya. Pola yang lazim: URL
 disimpan base64, dipecah jadi escape heksadesimal, dirangkai dari potongan string,
 atau ditaruh di JSON server-rendered — lalu diserahkan ke `hls.js`.
 
-StreamGrab tidak memakai aturan khusus per situs (extractor hardcoded patah begitu
+Komang-streampull (KSP) tidak memakai aturan khusus per situs (extractor hardcoded patah begitu
 situsnya ganti bundler). Pendekatannya: **cegat di titik yang tidak bisa dihindari
 situs mana pun**. Seobfuscated apa pun kodenya, pada akhirnya URL asli harus melewati
 `atob`, `JSON.parse`, `fetch`, atau `loadSource` — dan semuanya sudah dipasangi hook.
@@ -64,7 +64,7 @@ Content script berjalan di **semua frame** (`all_frames: true`), jadi video yang
 
 CDN situs-situs ini biasanya menolak request yang `Referer`-nya bukan halaman aslinya.
 Fetch dari extension tidak boleh menyetel `Referer` (header terlarang di `fetch()`), jadi
-StreamGrab memasang aturan **`declarativeNetRequest` sesi** yang menulis ulang
+Komang-streampull (KSP) memasang aturan **`declarativeNetRequest` sesi** yang menulis ulang
 `Referer` / `Origin` / `Cookie` khusus untuk request yang berasal dari extension
 (`tabIds: [-1]`, jadi trafik tab biasa tidak tersentuh). Aturan itu dicabut lagi
 begitu job selesai.
@@ -152,11 +152,23 @@ memungkinkan tulis acak dari banyak koneksi sekaligus sekaligus menghapus plafon
 ## Pasang
 
 1. Buka `chrome://extensions` (Chrome, Edge, Brave, Opera — semua Chromium ≥ 116).
-2. Nyalakan **Developer mode** di pojok kanan atas.
-3. Klik **Load unpacked**, pilih folder `D:\web 2.0\streamgrab`.
-4. **Pin ikonnya** — lihat di bawah.
+2. Nyalakan **Developer mode**.
+3. **Hapus** extension lama (GoVideo/StreamGrab/KSP) kalau masih ada — lalu **Load unpacked**.
+4. Pilih folder **`D:\streamgrab\v3-setelah-prd`** (yang ada `manifest.json`-nya, **bukan** `.output`).
 
-Tidak ada proses build. Tidak ada dependensi npm.
+Tidak perlu `npm run build` untuk dipakai. Build WXT hanya untuk zip/distribusi.
+
+5. **Pin ikonnya** — puzzle 🧩 → **Komang-streampull** → pin 📌.
+6. **Refresh tab video** yang sudah terbuka (F5) supaya content script ikut reload.
+
+### Zip / build (opsional)
+
+```bash
+npm install
+npm run pack
+```
+
+Hasil: `.output/komang-streampull-2.0.0-chrome.zip` atau load `.output\chrome-mv3`.
 
 ### Ikonnya tidak muncul di toolbar
 
@@ -164,14 +176,13 @@ Ini normal, bukan kerusakan: **extension unpacked tidak pernah otomatis di-pin.*
 Chrome menaruhnya di menu Extensions, bukan langsung di toolbar.
 
 1. Klik ikon **puzzle 🧩** di kanan address bar.
-2. Cari **StreamGrab** di daftar.
+2. Cari **Komang-streampull (KSP)** di daftar.
 3. Klik ikon **pin 📌** di sebelahnya — barulah ikonnya nangkring di toolbar.
 
-Kalau StreamGrab **tidak ada** di daftar puzzle itu:
+Kalau Komang-streampull (KSP) **tidak ada** di daftar puzzle itu:
 
-- Pastikan folder yang dipilih adalah folder yang **berisi `manifest.json` langsung**
-  (`D:\web 2.0\streamgrab`), bukan folder induknya.
-- Lihat kartu StreamGrab di `chrome://extensions` — kalau ada tombol **Errors**
+- Pastikan folder yang dipilih adalah **`D:\streamgrab\v3-setelah-prd`** (root, ada `manifest.json` + folder `src/`).
+- Lihat kartu Komang-streampull (KSP) di `chrome://extensions` — kalau ada tombol **Errors**
   (kuning/merah), klik dan baca isinya.
 - Tombol **service worker** di kartu itu membuka DevTools background; tab Console
   di situ menampilkan error runtime.
@@ -187,13 +198,13 @@ Kalau StreamGrab **tidak ada** di daftar puzzle itu:
 ## Pakai
 
 1. Buka halaman videonya, misal `https://streamrizz.com/d/zxsuoute1j1q`.
-2. Klik ikon StreamGrab. Kalau daftarnya masih kosong:
+2. Klik ikon Komang-streampull (KSP). Kalau daftarnya masih kosong:
    - tekan **Putar** — extension memaksa `<video>`/tombol play supaya player memuat stream, atau
    - tekan **Pindai** — memindai ulang script halaman, atau
    - mainkan videonya sendiri 2–3 detik lalu buka lagi panelnya.
-3. Entri **HLS** akan muncul. Tekan **Cek kualitas** untuk melihat daftar resolusi
-   (kalau URL tersebut master playlist), lalu **Unduh** pada kualitas yang diinginkan.
-4. Berkas tersimpan di `Downloads/StreamGrab/<judul halaman>.<ext>`.
+3. Entri **HLS** / **DASH** / **FILE** akan muncul. Tekan **Kualitas** untuk daftar resolusi,
+   atau **Unduh terbaik** untuk kualitas teratas.
+4. Berkas tersimpan di `Downloads/KSP/<judul halaman>.<ext>` (folder bisa diubah di Pengaturan).
 
 Angka **Paralel** di bawah mengatur berapa segmen diunduh bersamaan (default 6).
 Turunkan ke 2–3 kalau server mulai membalas 403/429.
@@ -219,7 +230,7 @@ yang tidak ditangani extension:
 | Audio ada di track terpisah (`#EXT-X-MEDIA:TYPE=AUDIO` punya URI sendiri) | Pakai perintah ffmpeg — penggabungan track butuh muxer sungguhan. Extension akan memberi peringatan bila ini terdeteksi. |
 | Berkas sangat besar | Sudah ditangani lewat OPFS (tulis ke disk). Kalau OPFS tidak tersedia dan file > ~2 GB, pakai perintah ffmpeg. |
 | Stream live tanpa `#EXT-X-ENDLIST` | Extension hanya mengambil segmen yang tercantum saat itu. Untuk merekam terus, pakai ffmpeg. |
-| DASH (`.mpd`) | Hanya dideteksi, tidak diunduh. Pakai perintah ffmpeg / `yt-dlp`. |
+| DASH live / DRM | Live DASH dan MPD terlindungi ditolak. VOD DASH tanpa DRM diunduh lewat engine. |
 | Widevine / SAMPLE-AES | **Tidak didukung dan tidak akan ditambahkan.** |
 | Situs yang stream-nya tetap tidak muncul | Pakai perintah ffmpeg bila kamu sudah punya URL-nya. Penyadapan `SourceBuffer.appendBuffer` dan perekaman ulang layar **sengaja tidak disertakan** — keduanya khusus untuk melumpuhkan mekanisme anti-unduh, bukan kemampuan umum. |
 | Unduhan langsung MP4 kena 403 | Tekan **Unduh via engine** — jalur ini memakai fetch bersama aturan header. |
@@ -281,3 +292,20 @@ Tidak ada data yang dikirim ke mana pun; semuanya lokal di browser.
 ---
 
 Pastikan kamu memang berhak mengunduh materi yang bersangkutan.
+
+## Dev preview (tanpa reload extension)
+
+```bash
+npm run dev:preview
+```
+
+Buka `http://localhost:5173/dev/` — popup live, studio, dan mockup Option B Modern Card di `dev/ksp-preview/`.
+
+## GitHub
+
+Repo target: **komang-streampull** (branch `dev`). Rename di GitHub Settings → General → Repository name, lalu:
+
+```bash
+git remote set-url origin https://github.com/KomangKlomang/komang-streampull.git
+```
+

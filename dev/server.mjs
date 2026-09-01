@@ -29,7 +29,7 @@ const DEV_BANNER = `
 </style>
 <div class="sg-dev-banner">
   <b>DEV PREVIEW</b>
-  <span>UI StreamGrab di browser IDE — data mock, bukan extension asli</span>
+  <span>UI Komang-streampull (KSP) di browser IDE — data mock, bukan extension asli</span>
   <a href="/dev/">Index</a>
   <a href="/dev/live/popup">Popup</a>
   <a href="/dev/live/studio">Studio</a>
@@ -60,7 +60,7 @@ function livePage(route) {
 
 function indexPage() {
   return `<!doctype html>
-<html lang="id"><head><meta charset="utf-8"><title>StreamGrab Dev</title>
+<html lang="id"><head><meta charset="utf-8"><title>KSP Dev</title>
 <style>
   body { font: 15px/1.5 system-ui; max-width: 520px; margin: 48px auto; padding: 0 20px;
     background: #0f172a; color: #f1f5f9; }
@@ -71,11 +71,12 @@ function indexPage() {
   code { background: #334155; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
   p { color: #94a3b8; }
 </style></head><body>
-  <h1>StreamGrab — Dev Preview</h1>
+  <h1>Komang-streampull — Dev Preview</h1>
   <p>Buka UI extension di browser IDE (Cursor / VS Code Simple Browser) tanpa reload extension Chrome.</p>
   <a class="card" href="/dev/live/popup"><strong>Popup</strong><br><span style="color:#94a3b8">Panel unduh 400px</span></a>
   <a class="card" href="/dev/live/studio"><strong>Studio</strong><br><span style="color:#94a3b8">Dashboard full-page</span></a>
-  <p>Jalankan: <code>npm run dev</code> lalu buka <code>http://localhost:${PORT}/dev/</code></p>
+  <a class="card" href="/dev/ksp-preview/index.html"><strong>Option B Preview</strong><br><span style="color:#94a3b8">Modern Card mockup statis (PRD §6.2)</span></a>
+  <p>Jalankan: <code>npm run dev:preview</code> lalu buka <code>http://localhost:${PORT}/dev/</code></p>
 </body></html>`;
 }
 
@@ -110,7 +111,8 @@ createServer((req, res) => {
 
   serveStatic(url, res);
 }).listen(PORT, () => {
-  console.log(`StreamGrab dev preview: http://localhost:${PORT}/dev/`);
+  console.log(`KSP dev preview: http://localhost:${PORT}/dev/`);
   console.log(`  Popup:  http://localhost:${PORT}/dev/live/popup`);
   console.log(`  Studio: http://localhost:${PORT}/dev/live/studio`);
+  console.log(`  Option B: http://localhost:${PORT}/dev/ksp-preview/index.html`);
 });

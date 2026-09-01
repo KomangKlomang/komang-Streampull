@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "StreamGrab",
-  "version": "1.0.0",
-  "description": "Mendeteksi dan mengunduh stream video (HLS/m3u8, MP4 progresif) dari tab aktif, lengkap dengan spoofing Referer/Origin.",
+  "name": "Komang-streampull (KSP)",
+  "version": "2.0.0",
+  "description": "Komang-streampull (KSP) — mendeteksi dan mengunduh stream video (HLS/m3u8, MP4 progresif) dari tab aktif, lengkap dengan spoofing Referer/Origin.",
   "minimum_chrome_version": "116",
 
   "permissions": [
@@ -19,6 +19,13 @@
 
   "host_permissions": ["<all_urls>"],
 
+  "commands": {
+    "download-primary": {
+      "suggested_key": { "default": "Alt+Shift+D" },
+      "description": "Unduh stream utama di tab aktif"
+    }
+  },
+
   "background": {
     "service_worker": "src/background.js",
     "type": "module"
@@ -26,7 +33,7 @@
 
   "action": {
     "default_popup": "src/popup/popup.html",
-    "default_title": "StreamGrab",
+    "default_title": "Komang-streampull (KSP)",
     "default_icon": {
       "16": "icons/icon16.png",
       "32": "icons/icon32.png",

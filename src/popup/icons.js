@@ -12,7 +12,7 @@ const NS = 'http://www.w3.org/2000/svg';
 export function icon(name, { size = 15, className = '', label } = {}) {
   const d = paths[name];
   if (!d) {
-    console.warn('[StreamGrab] unknown icon:', name);
+    console.warn('[KSP] unknown icon:', name);
     const span = document.createElement('span');
     span.textContent = '•';
     span.setAttribute('aria-hidden', 'true');

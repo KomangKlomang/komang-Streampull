@@ -2,19 +2,23 @@
 <html lang="id">
   <head>
     <meta charset="utf-8" />
-    <title>StreamGrab</title>
+    <title>Komang-streampull (KSP)</title>
   </head>
   <body>
-    <header class="bar">
-      <div class="brand">
-        <span class="dot" aria-hidden="true"></span>
-        <span>StreamGrab</span>
+    <div class="sticky-chrome">
+    <header class="header">
+      <div class="logo">
+        <span class="logo-icon" aria-hidden="true">
+          <img src="/icons/ksp-logo.png" width="28" height="28" alt="" />
+        </span>
+        <div class="logo-text">Komang-<span>streampull</span></div>
+        <span class="logo-ksp">KSP</span>
       </div>
-      <div class="bar-actions">
-        <button id="btn-studio" class="ghost icon-btn" type="button" aria-label="Buka StreamGrab Studio" title="Studio"></button>
-        <button id="btn-scan" class="ghost icon-btn" type="button" aria-label="Pindai ulang halaman" title="Pindai"></button>
-        <button id="btn-play" class="ghost icon-btn" type="button" aria-label="Putar video" title="Putar"></button>
-        <button id="btn-clear" class="ghost icon-btn" type="button" aria-label="Kosongkan daftar" title="Bersihkan"></button>
+      <div class="header-right">
+        <span id="found-pill" class="pill hidden">0 found</span>
+        <button id="btn-studio" class="icon-btn" type="button" aria-label="Buka KSP Studio" title="Studio"></button>
+        <button id="btn-scan" class="icon-btn" type="button" aria-label="Pindai ulang halaman" title="Pindai"></button>
+        <button id="btn-clear" class="icon-btn" type="button" aria-label="Kosongkan daftar" title="Bersihkan"></button>
       </div>
     </header>
 
@@ -24,18 +28,38 @@
       <button class="tab" data-tab="settings" type="button" role="tab" aria-selected="false"></button>
     </nav>
 
-    <div id="panel-main" class="panel">
-      <p id="page-host" class="page-host"></p>
-
-      <section id="jobs-wrap" class="jobs hidden" aria-label="Unduhan aktif">
-        <div class="jobs-head">
-          <h2><span class="jobs-head-icon" aria-hidden="true"></span> Unduhan aktif</h2>
-          <button id="btn-clear-jobs" class="ghost small icon-btn" type="button" aria-label="Bersihkan unduhan selesai" title="Bersihkan selesai"></button>
+    <section id="preview" class="preview" aria-label="Pratinjau video">
+      <div id="preview-frame" class="preview-frame">
+        <video id="preview-player" class="preview-player" muted playsinline preload="metadata"></video>
+        <div id="preview-ph" class="preview-placeholder">
+          <p class="preview-ph-copy">Klik Preview untuk memuat di KSP</p>
         </div>
-        <div id="jobs" class="list"></div>
-      </section>
+        <div class="preview-bar">
+          <button id="btn-grab" class="ghost icon-btn" type="button" aria-label="Tampilkan preview di extension tanpa memutar video halaman" title="Preview di sini">
+            <span>Preview</span>
+          </button>
+          <button id="btn-play" class="ghost icon-btn" type="button" aria-label="Putar video di tab" title="Ke video">
+            <span>Ke video</span>
+          </button>
+        </div>
+      </div>
+    </section>
 
-      <section id="preview" class="preview"></section>
+    <section id="jobs-wrap" class="jobs jobs-dock" aria-label="Unduhan aktif">
+      <div class="jobs-head">
+        <h2><span class="jobs-head-icon" aria-hidden="true"></span> Unduhan</h2>
+        <button id="btn-clear-jobs" class="icon-btn sm" type="button" aria-label="Bersihkan unduhan selesai" title="Bersihkan selesai"></button>
+      </div>
+      <div id="jobs" class="list"></div>
+    </section>
+    </div>
+
+    <div id="panel-main" class="panel">
+      <div class="context">
+        <span class="context-dot" aria-hidden="true"></span>
+        <p id="page-host" class="context-url"></p>
+      </div>
+
       <section id="media" class="list" aria-live="polite"></section>
       <section id="diag" class="diag"></section>
     </div>
@@ -43,7 +67,7 @@
     <div id="panel-history" class="panel hidden" role="tabpanel">
       <div class="panel-head">
         <h2><span class="history-head-icon" aria-hidden="true"></span> Riwayat unduhan</h2>
-        <button id="btn-clear-history" class="ghost small icon-btn" type="button" aria-label="Kosongkan riwayat" title="Kosongkan"></button>
+        <button id="btn-clear-history" class="icon-btn sm" type="button" aria-label="Kosongkan riwayat" title="Kosongkan"></button>
       </div>
       <div id="history" class="list"></div>
     </div>
@@ -52,27 +76,49 @@
       <div class="settings">
         <label class="field">
           <span class="field-label">Folder simpan otomatis</span>
-          <input id="set-folder" type="text" placeholder="StreamGrab" spellcheck="false" />
-          <span class="field-hint">Subfolder di folder unduhan Chrome. Contoh: <code>Videos/StreamGrab</code>. Dipakai saat simpan otomatis dan sebagai lokasi awal jika dialog Chrome muncul.</span>
+          <input id="set-folder" type="text" placeholder="KSP" spellcheck="false" />
+          <span class="field-hint">Subfolder di folder unduhan Chrome. Contoh: <code>Videos/KSP</code>.</span>
         </label>
         <label class="field check">
           <input id="set-ask-save" type="checkbox" />
-          <span>Selalu tampilkan dialog simpan (lokasi awal dari folder di atas)</span>
+          <span>Selalu tampilkan dialog simpan</span>
         </label>
         <p id="save-hint" class="save-hint">
-          Unduhan dirakit di extension dulu, lalu disimpan otomatis ke folder di atas.
+          Unduhan dirakit di extension, lalu disimpan otomatis ke folder di atas.
         </p>
         <label class="field">
           <span class="field-label">Koneksi paralel</span>
           <input id="conc" type="number" min="1" max="16" step="1" />
           <span class="field-hint">Batas koneksi paralel per unduhan (1–16).</span>
         </label>
+        <label class="field">
+          <span class="field-label">Unduhan bersamaan</span>
+          <input id="queue-conc" type="number" min="1" max="5" step="1" />
+          <span class="field-hint">Berapa job boleh jalan bersamaan (1–5). Sisanya antre.</span>
+        </label>
       </div>
     </div>
 
-    <footer class="foot">
-      <span class="hint">Unduh → rakit di extension → simpan otomatis ke folder Pengaturan.</span>
-      <button id="btn-diag" class="ghost small icon-btn" type="button" aria-label="Diagnostik" title="Diagnostik"></button>
+    <footer class="footer">
+      <span id="save-foot" class="hint">Auto-save → KSP/</span>
+      <div class="footer-actions">
+        <a
+          id="btn-github"
+          class="icon-btn sm github"
+          href="https://github.com/KomangKlomang"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="GitHub KomangKlomang"
+          title="GitHub"
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor" aria-hidden="true">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
+            />
+          </svg>
+        </a>
+        <button id="btn-diag" class="icon-btn sm" type="button" aria-label="Diagnostik" title="Diagnostik"></button>
+      </div>
     </footer>
 
     <script type="module" src="./main.js"></script>

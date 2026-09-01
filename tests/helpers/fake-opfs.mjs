@@ -137,7 +137,7 @@ export function installFakeOpfs({ now = () => Date.now() } = {}) {
 
   return {
     root,
-    dir: async () => root.getDirectoryHandle('streamgrab', { create: true }),
+    dir: async () => root.getDirectoryHandle('govideo', { create: true }),
     uninstall: () => restore(),
   };
 }

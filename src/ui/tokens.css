@@ -1,22 +1,61 @@
-/* StreamGrab design tokens — vanilla CSS, Chromium popup/options safe */
+/* Komang-streampull (KSP) — light Option B (teal on white) */
 :root {
-  color-scheme: dark;
-  --sg-bg: #0b1220;
-  --sg-surface: #111827;
-  --sg-surface-2: #1f2937;
-  --sg-border: #334155;
-  --sg-text: #f8fafc;
-  --sg-muted: #94a3b8;
-  --sg-accent: #6366f1;
-  --sg-accent-hover: #818cf8;
-  --sg-ok: #22c55e;
-  --sg-warn: #f59e0b;
-  --sg-err: #ef4444;
-  --sg-radius: 8px;
-  --sg-radius-sm: 6px;
-  --sg-shadow: 0 1px 0 rgb(255 255 255 / 0.04), 0 8px 24px rgb(0 0 0 / 0.35);
-  --sg-focus: 0 0 0 2px var(--sg-bg), 0 0 0 4px var(--sg-accent);
-  --sg-font: system-ui, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  color-scheme: light;
+
+  --ksp-bg: #f4f6f8;
+  --ksp-surface: #ffffff;
+  --ksp-surface-2: #f1f5f9;
+  --ksp-surface-3: #e2e8f0;
+  --ksp-card: #ffffff;
+  --ksp-border: #d8dee6;
+
+  --ksp-text: #0f172a;
+  --ksp-sub: #334155;
+  --ksp-muted: #64748b;
+
+  --ksp-accent: #0d9488;
+  --ksp-accent-hover: #0f766e;
+  --ksp-accent-bg: rgb(13 148 136 / 0.12);
+  --ksp-accent-sky: #0284c7;
+  --ksp-on-accent: #042f2e;
+
+  /* Stream-type (PRD §6.4) — darker for 4.5:1 on white */
+  --ksp-hls: #0f766e;
+  --ksp-hls-glow: rgb(13 148 136 / 0.28);
+  --ksp-file: #15803d;
+  --ksp-file-glow: rgb(21 128 61 / 0.28);
+  --ksp-dash: #a16207;
+  --ksp-dash-glow: rgb(161 98 7 / 0.28);
+
+  --ksp-ok: #15803d;
+  --ksp-warn: #a16207;
+  --ksp-err: #dc2626;
+
+  --ksp-radius: 16px;
+  --ksp-radius-sm: 12px;
+  --ksp-shadow: 0 8px 24px rgb(15 23 42 / 0.08);
+  --ksp-card-shadow: 0 1px 2px rgb(15 23 42 / 0.06);
+  --ksp-focus: 0 0 0 2px var(--ksp-bg), 0 0 0 4px var(--ksp-accent);
+  --ksp-font: 'Segoe UI', system-ui, sans-serif;
+  --ksp-mono: 'Cascadia Mono', Consolas, ui-monospace, monospace;
+  --ksp-space: 8px;
+
+  --sg-bg: var(--ksp-bg);
+  --sg-surface: var(--ksp-surface);
+  --sg-surface-2: var(--ksp-surface-2);
+  --sg-border: var(--ksp-border);
+  --sg-text: var(--ksp-text);
+  --sg-muted: var(--ksp-muted);
+  --sg-accent: var(--ksp-accent);
+  --sg-accent-hover: var(--ksp-accent-hover);
+  --sg-ok: var(--ksp-ok);
+  --sg-warn: var(--ksp-warn);
+  --sg-err: var(--ksp-err);
+  --sg-radius: var(--ksp-radius-sm);
+  --sg-radius-sm: 10px;
+  --sg-shadow: var(--ksp-shadow);
+  --sg-focus: var(--ksp-focus);
+  --sg-font: var(--ksp-font);
 }
 
 @media (prefers-reduced-motion: reduce) {

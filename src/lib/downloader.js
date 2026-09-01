@@ -3,6 +3,7 @@
 
 import { downloadRanged } from './accel.js';
 import { parseM3U8, sortVariants } from './m3u8.js';
+import { dashRepIdFromUrl, parseMpd, pickDashRep } from './mpd.js';
 import { fetchBytes, fetchText } from './net.js';
 import { createSink } from './sink.js';
 import { AdaptiveConcurrency, SpeedMeter, etaSeconds } from './speed.js';
@@ -244,4 +245,134 @@ export async function downloadFile(job) {
 
   const { blob, cleanup } = await sink.finish();
   return { blob, ext, warnings, cleanup };
+}
+
+// ---------------------------------------------------------------- DASH ---
+
+export async function downloadDash(job) {
+  const {
+    url,
+    signal,
+    concurrency = 6,
+    onProgress = () => {},
+    sinkFactory = createSink,
+    pauseGate = createPauseGate(),
+  } = job;
+  const warnings = [];
+
+  const text = await fetchText(url, { signal });
+  const mpd = parseMpd(text, url);
+  if (mpd.live) throw new Error('DASH live tidak didukung.');
+  if (mpd.drm) throw new Error('Stream terlindungi DRM — tidak bisa diunduh.');
+  if (mpd.multiPeriod) warnings.push('MPD multi-period — hanya period pertama yang diunduh.');
+
+  const rep = pickDashRep(mpd, job.repId || dashRepIdFromUrl(url));
+  if (!rep) throw new Error('Tidak ada Representation DASH yang bisa diunduh.');
+
+  const parts = [];
+  if (rep.init?.url) parts.push(rep.init);
+  parts.push(...rep.segments);
+  if (!parts.length) throw new Error('DASH tidak berisi segmen.');
+
+  if (mpd.representations.some((r) => r.contentType === 'audio') && rep.contentType !== 'audio') {
+    warnings.push('Audio berada di track terpisah — gunakan perintah ffmpeg agar tergabung.');
+  }
+
+  const sink = await sinkFactory({ mime: 'video/mp4', name: `dash-${Date.now()}.mp4` });
+  const total = parts.length;
+  const meter = new SpeedMeter();
+  const maxConc = Math.max(1, Math.min(concurrency, 16));
+  const controller = new AdaptiveConcurrency({
+    meter,
+    start: Math.min(3, maxConc),
+    max: maxConc,
+  });
+  controller.start();
+
+  const results = new Array(total);
+  let writeIndex = 0;
+  let completed = 0;
+  let cursor = 0;
+  let active = 0;
+  let finished = false;
+
+  const report = () => {
+    const bps = meter.bps;
+    const avgBytes = completed > 0 ? sink.bytes / completed : 0;
+    onProgress({
+      completed,
+      total,
+      bytes: sink.bytes,
+      bps,
+      eta: etaSeconds(avgBytes * (total - completed), bps),
+      connections: active,
+      duration: mpd.duration,
+    });
+  };
+  const ticker = setInterval(report, 400);
+
+  const drain = async () => {
+    while (writeIndex < total && results[writeIndex] !== undefined) {
+      const data = results[writeIndex];
+      results[writeIndex] = undefined;
+      writeIndex++;
+      await sink.append(data);
+    }
+  };
+
+  let drainChain = Promise.resolve();
+  const scheduleDrain = () => {
+    drainChain = drainChain.then(drain, drain);
+    return drainChain;
+  };
+
+  const fetchSegment = async (i) => {
+    const seg = parts[i];
+    const data = await fetchBytes(seg.url, { signal, byterange: seg.byterange });
+    meter.add(data.byteLength);
+    return data;
+  };
+
+  const pump = async () => {
+    for (;;) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      await pauseGate.wait(signal);
+      const i = cursor++;
+      if (i >= total) return;
+      active++;
+      try {
+        results[i] = await fetchSegment(i);
+      } catch (err) {
+        controller.onError(err?.status);
+        throw err;
+      } finally {
+        active--;
+      }
+      completed++;
+      await scheduleDrain();
+    }
+  };
+
+  const gatedPump = async (index) => {
+    while (index >= controller.target) {
+      if (signal?.aborted || finished || cursor >= total) return;
+      await pauseGate.wait(signal);
+      await sleep(300, signal).catch(() => {});
+    }
+    return pump();
+  };
+
+  try {
+    await Promise.all(Array.from({ length: maxConc }, (_, i) => gatedPump(i)));
+    finished = true;
+    await scheduleDrain();
+  } finally {
+    finished = true;
+    controller.stop();
+    clearInterval(ticker);
+  }
+
+  report();
+  const { blob, cleanup } = await sink.finish();
+  return { blob, ext: 'mp4', warnings, cleanup, duration: mpd.duration };
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Penjalan tes StreamGrab. Tanpa dependensi — cukup: node tests/run.mjs
+// Penjalan tes Komang-streampull (KSP). Tanpa dependensi — cukup: node tests/run.mjs
 import { readdir } from 'node:fs/promises';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';

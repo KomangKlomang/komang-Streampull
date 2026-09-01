@@ -5,10 +5,10 @@
 
 (() => {
   'use strict';
-  if (window.__streamgrabHooked) return;
-  window.__streamgrabHooked = true;
+  if (window.__govideoHooked) return;
+  window.__govideoHooked = true;
 
-  const CHANNEL = 'STREAMGRAB_PAGE';
+  const CHANNEL = 'GOVIDEO_PAGE';
   const MEDIA_RE = /\.(m3u8|m3u|mpd|mp4|m4v|webm|mkv|mov|flv)(?:$|[?#])/i;
   const HINT_RE = /m3u8|\.mpd|\.mp4|\/hls\/|playlist/i;
   const seen = new Set();
@@ -75,6 +75,27 @@
     } catch {
       /* properti tidak bisa didefinisikan ulang */
     }
+  }
+
+  function reportDrm(keySystem) {
+    try {
+      window.postMessage({ channel: CHANNEL, drm: true, keySystem: String(keySystem || '') }, '*');
+    } catch {
+      /* abaikan */
+    }
+  }
+
+  try {
+    if (typeof navigator.requestMediaKeySystemAccess === 'function') {
+      const nativeEme = navigator.requestMediaKeySystemAccess.bind(navigator);
+      navigator.requestMediaKeySystemAccess = function requestMediaKeySystemAccess(keySystem) {
+        reportDrm(keySystem);
+        return nativeEme.apply(navigator, arguments);
+      };
+      mark('eme');
+    }
+  } catch {
+    /* abaikan */
   }
 
   // ---------------------------------------------------------------- fetch ---
@@ -378,8 +399,16 @@
   function deepScan() {
     try {
       for (const el of document.querySelectorAll('video, source, [data-src], [data-file]')) {
-        report(el.getAttribute('src') || el.getAttribute('data-src') || el.getAttribute('data-file'), 'dom');
-        if (el.currentSrc) report(el.currentSrc, 'dom');
+        const vid = el.tagName === 'VIDEO' ? el : el.closest?.('video');
+        const playing = vid && vid.paused === false;
+        report(
+          el.getAttribute('src') ||
+            el.getAttribute('data-src') ||
+            el.getAttribute('data-file') ||
+            el.getAttribute('data-fallback'),
+          playing ? 'playing' : 'dom'
+        );
+        if (el.currentSrc) report(el.currentSrc, playing ? 'playing' : 'dom');
       }
       for (const script of document.querySelectorAll('script')) {
         scanText(script.textContent || '', 'inline-script');
@@ -398,8 +427,34 @@
   }
 
   // ------------------------------------------------------------- preview ---
-  // Frame asli dari <video> yang sedang termuat. Kalau kanvasnya ter-taint
-  // (sumber lintas-domain tanpa CORS), jatuh ke poster/og:image.
+  // Ambil still di extension tanpa memutar video halaman.
+  // Frame dari <video> yang sudah punya piksel (boleh paused). Kalau kanvas
+  // ter-taint, atau belum ada frame, jatuh ke poster/og:image.
+  function videoMeta(v) {
+    return {
+      width: v.videoWidth,
+      height: v.videoHeight,
+      duration: Number.isFinite(v.duration) ? v.duration : 0,
+      currentTime: Number.isFinite(v.currentTime) ? v.currentTime : 0,
+    };
+  }
+
+  function grabFrame(v) {
+    if (!v || v.videoWidth <= 0 || v.videoHeight <= 0) return false;
+    try {
+      const scale = Math.min(1, 480 / v.videoWidth);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.round(v.videoWidth * scale));
+      canvas.height = Math.max(1, Math.round(v.videoHeight * scale));
+      canvas.getContext('2d').drawImage(v, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
+      postThumb({ ...videoMeta(v), dataUrl, from: 'frame' });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function captureThumb() {
     let best = null;
     try {
@@ -413,30 +468,35 @@
     }
 
     if (best) {
-      const meta = {
-        width: best.videoWidth,
-        height: best.videoHeight,
-        duration: Number.isFinite(best.duration) ? best.duration : 0,
-        currentTime: Number.isFinite(best.currentTime) ? best.currentTime : 0,
-      };
-      try {
-        const scale = Math.min(1, 480 / best.videoWidth);
-        const canvas = document.createElement('canvas');
-        canvas.width = Math.max(1, Math.round(best.videoWidth * scale));
-        canvas.height = Math.max(1, Math.round(best.videoHeight * scale));
-        canvas.getContext('2d').drawImage(best, 0, 0, canvas.width, canvas.height);
-        // Melempar SecurityError bila kanvas ter-taint.
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.7);
-        postThumb({ ...meta, dataUrl, from: 'frame' });
-        return;
-      } catch {
-        postThumb({ ...meta, url: posterUrl(), from: 'poster' });
+      if (grabFrame(best)) return;
+      const url = posterUrl();
+      if (url) {
+        postThumb({ ...videoMeta(best), url, from: 'poster' });
         return;
       }
     }
 
     const url = posterUrl();
-    if (url) postThumb({ url, from: 'poster' });
+    if (url) {
+      postThumb({ url, from: 'poster' });
+      return;
+    }
+
+    // Decode satu still lewat seek, tanpa play().
+    try {
+      const v = [...document.querySelectorAll('video')].find((el) => el.readyState >= 1);
+      if (!v || v.videoWidth > 0 || !v.paused) return;
+      const finish = () => {
+        grabFrame(v);
+      };
+      v.addEventListener('seeked', finish, { once: true });
+      v.addEventListener('loadeddata', finish, { once: true });
+      if (Number.isFinite(v.duration) && v.duration > 0 && v.currentTime === 0) {
+        v.currentTime = Math.min(0.2, v.duration / 20);
+      }
+    } catch {
+      /* abaikan */
+    }
   }
 
   function posterUrl() {
@@ -478,7 +538,7 @@
   }
 
   window.addEventListener('message', (ev) => {
-    if (ev.source !== window || ev.data?.channel !== 'STREAMGRAB_CMD') return;
+    if (ev.source !== window || ev.data?.channel !== 'GOVIDEO_CMD') return;
     if (ev.data.cmd === 'deep-scan') deepScan();
     if (ev.data.cmd === 'force-play') forcePlay();
     if (ev.data.cmd === 'capture-thumb') captureThumb();

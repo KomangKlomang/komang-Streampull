@@ -1,16 +1,17 @@
 @import url('../ui/tokens.css');
 
 :root {
-  --bg: var(--sg-bg);
-  --bg-2: var(--sg-surface);
-  --bg-3: var(--sg-surface-2);
-  --line: var(--sg-border);
-  --fg: var(--sg-text);
-  --dim: var(--sg-muted);
-  --accent: var(--sg-accent);
-  --err: var(--sg-err);
-  --warn: var(--sg-warn);
-  --info: var(--sg-accent-hover);
+  --bg: var(--ksp-bg);
+  --bg-2: var(--ksp-surface);
+  --bg-3: var(--ksp-surface-2);
+  --card: var(--ksp-card);
+  --line: var(--ksp-border);
+  --fg: var(--ksp-text);
+  --dim: var(--ksp-muted);
+  --accent: var(--ksp-accent);
+  --err: var(--ksp-err);
+  --warn: var(--ksp-warn);
+  --info: var(--ksp-hls);
 }
 
 * {
@@ -28,7 +29,7 @@ body {
   flex-direction: column;
   background: var(--bg);
   color: var(--fg);
-  font: 14px/1.5 system-ui, 'Segoe UI', Roboto, sans-serif;
+  font: 14px/1.5 var(--ksp-font);
 }
 
 .topbar {
@@ -38,7 +39,8 @@ body {
   gap: 16px;
   padding: 12px 20px;
   border-bottom: 1px solid var(--line);
-  background: var(--bg-2);
+  background: linear-gradient(180deg, var(--card) 0%, var(--bg-2) 100%);
+  box-shadow: var(--ksp-shadow);
 }
 
 .brand {
@@ -49,8 +51,37 @@ body {
 
 .brand h1 {
   margin: 0;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
+}
+
+.brand-tag {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: var(--ksp-accent-bg);
+  color: var(--ksp-accent);
+}
+
+.logo-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+}
+
+.logo-icon img,
+.logo-icon svg {
+  width: 28px;
+  height: 28px;
+  object-fit: cover;
+  display: block;
 }
 
 .dot {
@@ -58,6 +89,7 @@ body {
   height: 10px;
   border-radius: 50%;
   background: var(--accent);
+  box-shadow: 0 0 12px var(--ksp-hls-glow);
 }
 
 .pill {
@@ -69,18 +101,18 @@ body {
 }
 
 .pill.ok {
-  background: #14532d;
-  color: #86efac;
+  background: rgb(21 128 61 / 0.12);
+  color: #15803d;
 }
 
 .pill.warn {
-  background: #78350f;
-  color: #fcd34d;
+  background: rgb(161 98 7 / 0.12);
+  color: #a16207;
 }
 
 .pill.bad {
-  background: #7f1d1d;
-  color: #fca5a5;
+  background: rgb(220 38 38 / 0.1);
+  color: #b91c1c;
 }
 
 .top-actions {
@@ -91,12 +123,13 @@ body {
 button {
   border: 1px solid var(--line);
   background: var(--accent);
-  color: #052e16;
-  border-radius: 6px;
+  color: #042f2e;
+  border-radius: var(--ksp-radius-sm);
   padding: 6px 12px;
   font: inherit;
   font-weight: 600;
   cursor: pointer;
+  transition: filter 0.15s ease, background 0.15s ease;
 }
 
 button.ghost {
@@ -106,6 +139,11 @@ button.ghost {
 
 button:hover {
   filter: brightness(1.08);
+}
+
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .layout {
@@ -170,7 +208,7 @@ button:hover {
 .problems {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
 
 .problem {
@@ -178,10 +216,11 @@ button:hover {
   grid-template-columns: 72px 88px 1fr;
   gap: 12px;
   align-items: start;
-  padding: 10px 12px;
+  padding: 12px 14px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg-2);
+  border-radius: var(--ksp-radius);
+  background: linear-gradient(165deg, var(--card) 0%, var(--bg-2) 100%);
+  box-shadow: var(--ksp-card-shadow);
 }
 
 .problem .sev {
@@ -224,13 +263,14 @@ button:hover {
   text-align: center;
   color: var(--dim);
   border: 1px dashed var(--line);
-  border-radius: 8px;
+  border-radius: var(--ksp-radius);
 }
 
 .table-wrap {
   overflow: auto;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: var(--ksp-radius);
+  background: var(--card);
 }
 
 table {
@@ -265,8 +305,9 @@ tr:last-child td {
 
 .tab-card {
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--bg-2);
+  border-radius: var(--ksp-radius);
+  background: linear-gradient(165deg, var(--card) 0%, var(--bg-2) 100%);
+  box-shadow: var(--ksp-card-shadow);
   overflow: hidden;
 }
 
@@ -308,10 +349,10 @@ tr:last-child td {
   display: grid;
   grid-template-columns: 160px 1fr;
   gap: 8px;
-  padding: 8px 10px;
-  background: var(--bg-2);
+  padding: 10px 12px;
+  background: var(--card);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: var(--ksp-radius-sm);
   font-size: 13px;
 }
 
@@ -345,5 +386,11 @@ tr:last-child td {
 
   .problem .detail {
     grid-column: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  button {
+    transition: none;
   }
 }

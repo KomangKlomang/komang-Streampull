@@ -3,7 +3,6 @@ import { ffmpegCommand, formatBytes, formatDuration, hostOf } from '../lib/util.
 import { icon, iconBtn } from './icons.js';
 
 const $ = (sel) => document.querySelector(sel);
-const previewEl = $('#preview');
 const diagEl = $('#diag');
 const mediaEl = $('#media');
 const jobsEl = $('#jobs');
@@ -47,6 +46,19 @@ function renderHistory(list) {
     bits.push(formatWhen(item.finishedAt));
     if (item.error) bits.push(item.error);
     row.append(el('div', 'history-meta', bits.join(' · ')));
+    if (item.status === 'done' && (item.downloadId != null || item.path)) {
+      const actions = el('div', 'history-actions');
+      const openFile = btnIcon('File', 'ghost small icon-btn', 'Buka berkas', 'Buka file');
+      openFile.addEventListener('click', () =>
+        send({ cmd: 'open-file', historyId: item.id, downloadId: item.downloadId, path: item.path })
+      );
+      const openFolder = btnIcon('Folder', 'ghost small icon-btn', 'Buka folder', 'Buka folder');
+      openFolder.addEventListener('click', () =>
+        send({ cmd: 'show-folder', historyId: item.id, downloadId: item.downloadId, path: item.path })
+      );
+      actions.append(openFile, openFolder);
+      row.append(actions);
+    }
     historyEl.append(row);
   }
 }
@@ -61,6 +73,7 @@ function switchTab(name) {
   panelMain.classList.toggle('hidden', name !== 'main');
   panelHistory.classList.toggle('hidden', name !== 'history');
   panelSettings.classList.toggle('hidden', name !== 'settings');
+  $('#preview')?.classList.toggle('hidden', name !== 'main');
   lastRender = '';
   refresh();
 }
@@ -93,6 +106,20 @@ const HISTORY_STATUS = {
   canceled: 'dibatalkan',
 };
 
+function mountLogo() {
+  const box = document.querySelector('.logo-icon');
+  if (!box) return;
+  let img = box.querySelector('img');
+  if (!img) {
+    img = document.createElement('img');
+    img.width = 28;
+    img.height = 28;
+    img.alt = '';
+    box.replaceChildren(img);
+  }
+  img.src = chrome.runtime.getURL('icons/ksp-logo.png');
+}
+
 function initChromeIcons() {
   const mount = (sel, name) => {
     const el = document.querySelector(sel);
@@ -101,6 +128,7 @@ function initChromeIcons() {
 
   mount('#btn-scan', 'Update');
   mount('#btn-play', 'Play');
+  mount('#btn-grab', 'Image');
   mount('#btn-clear', 'Trash');
   mount('#btn-clear-jobs', 'Trash');
   mount('#btn-clear-history', 'Trash');
@@ -139,84 +167,104 @@ function formatSpeed(bps) {
   return bps > 0 ? `${formatBytes(bps)}/s` : '—';
 }
 
-let lastThumbKey = '';
+let lastThumbKey = null;
 
-function renderPreview(thumb) {
-  const key = thumb ? `${thumb.from}|${thumb.at}|${thumb.dataUrl?.length || thumb.url || ''}` : '';
-  if (key === lastThumbKey) return;
-  lastThumbKey = key;
-  previewEl.replaceChildren();
+function showPreview(res) {
+  const video = $('#preview-player');
+  const ph = $('#preview-ph');
+  if (!video || !ph) return;
 
-  const frame = el('div', 'preview-frame');
+  const playUrl = res?.playUrl;
+  const thumb = res?.thumb;
   const src = thumb?.dataUrl || thumb?.url;
+  const key = playUrl || src || '';
+  if (key && key === lastThumbKey) return;
+  if (key) lastThumbKey = key;
+
+  if (playUrl) {
+    ph.classList.add('hidden');
+    if (video.getAttribute('src') !== playUrl) video.src = playUrl;
+    video.muted = true;
+    const freeze = () => {
+      try {
+        if (video.readyState >= 2) video.pause();
+      } catch {
+        /* autoplay ditolak */
+      }
+    };
+    video.addEventListener('loadeddata', freeze, { once: true });
+    video.onerror = () => {
+      lastThumbKey = null;
+      ph.classList.remove('hidden');
+    };
+    video.play().then(() => setTimeout(freeze, 400)).catch(freeze);
+    return;
+  }
 
   if (src) {
-    const img = document.createElement('img');
-    img.src = src;
-    img.alt = 'Pratinjau video';
-    img.addEventListener('error', () => {
-      img.replaceWith(el('div', 'preview-placeholder', 'Pratinjau tidak bisa dimuat.'));
-    });
-    frame.append(img);
-    if (thumb.duration) {
-      frame.append(el('span', 'stamp', formatDuration(thumb.duration)));
-    }
-  } else {
-    frame.append(
-      el(
-        'div',
-        'preview-placeholder',
-        'Belum ada pratinjau. Tekan Putar agar player memuat frame pertama, lalu Ambil frame.'
-      )
-    );
+    ph.classList.add('hidden');
+    video.removeAttribute('src');
+    video.poster = src;
+    return;
   }
-  previewEl.append(frame);
-
-  const meta = el('div', 'preview-meta');
-  if (thumb?.width && thumb?.height) {
-    meta.append(el('span', null, `${thumb.width}×${thumb.height}`));
-  }
-  if (thumb?.from) {
-    meta.append(el('span', null, thumb.from === 'frame' ? 'frame langsung' : 'poster halaman'));
-  }
-  meta.append(el('span', 'spacer'));
-
-  const grab = btnIcon('Image', 'ghost small icon-btn', 'Tangkap frame yang sedang tampil di player', 'Ambil frame');
-  grab.addEventListener('click', async () => {
-    grab.disabled = true;
-    await send({ cmd: 'capture-thumb' });
-    setTimeout(() => {
-      grab.disabled = false;
-      lastRender = '';
-      refresh();
-    }, 800);
-  });
-  meta.append(grab);
-  previewEl.append(meta);
 }
+
+function placeholderFrame() {
+  const ph = el('div', 'preview-placeholder');
+  ph.append(el('p', 'preview-ph-copy', 'Klik Preview untuk memuat di KSP'));
+  return ph;
+}
+
+let showAllStreams = false;
+let showAllJobs = false;
 
 function renderMedia(list) {
   mediaEl.replaceChildren();
 
   if (!list.length) {
     const empty = el('div', 'empty');
-    empty.append(
-      'Belum ada stream terdeteksi.',
-      el('br'),
-      'Tekan Putar untuk memicu player, atau mainkan videonya sebentar lalu buka lagi panel ini.'
-    );
+    empty.append('Belum ada stream terdeteksi.');
     mediaEl.append(empty);
     return;
   }
 
-  for (const entry of list) {
-    mediaEl.append(renderEntry(entry));
+  const toolbar = el('div', 'media-toolbar');
+  const all = btnIcon('Download', 'ghost small icon-btn', 'Unduh semua stream yang bisa', 'Unduh semua');
+  all.addEventListener('click', async () => {
+    all.disabled = true;
+    const res = await send({ cmd: 'download-all' });
+    if (!res?.ok) alert(`Gagal mengantrekan unduhan: ${res?.error || 'tidak diketahui'}`);
+    lastRender = '';
+    refresh();
+  });
+  toolbar.append(all);
+  mediaEl.append(toolbar);
+
+  const [primary, ...rest] = list;
+  mediaEl.append(renderEntry(primary, true));
+  if (!rest.length) return;
+  if (showAllStreams) {
+    for (const entry of rest) mediaEl.append(renderEntry(entry, false));
+    return;
   }
+  const more = btnIcon(
+    'ChevronDown',
+    'ghost small icon-btn more-streams',
+    'Tampilkan stream lain',
+    `${rest.length} stream lain terdeteksi`
+  );
+  more.addEventListener('click', () => {
+    showAllStreams = true;
+    lastRender = '';
+    refresh();
+  });
+  mediaEl.append(more);
 }
 
-function renderEntry(entry) {
-  const item = el('div', 'item');
+function renderEntry(entry, primary = false) {
+  const item = el('div', primary ? 'item primary' : 'item');
   item.dataset.id = entry.id;
+  item.dataset.kind = entry.kind;
 
   const head = el('div', 'item-head');
   const kindLabel = entry.kind === 'hls' ? 'HLS' : entry.kind === 'dash' ? 'DASH' : 'FILE';
@@ -225,6 +273,13 @@ function renderEntry(entry) {
   badge.append(icon(kindIcon, { size: 11 }));
   badge.append(document.createTextNode(kindLabel));
   head.append(badge);
+  if (entry.drm) {
+    const drm = el('span', 'badge drm badge-with-icon');
+    drm.append(icon('CrossCircled', { size: 11 }));
+    drm.append(document.createTextNode('DRM'));
+    drm.title = entry.drmSystem ? `Terlindungi ${entry.drmSystem}` : 'Terlindungi DRM — tidak bisa diunduh';
+    head.append(drm);
+  }
   const title = el('span', 'item-title', shortUrl(entry.url));
   title.title = entry.url;
   head.append(title);
@@ -238,9 +293,9 @@ function renderEntry(entry) {
   const size = best?.size || entry.size;
   if (size) {
     // HLS tidak punya Content-Length; angkanya hasil pengukuran sampel segmen.
-    const approx = entry.estimatedSize || best?.estimated || entry.kind === 'hls';
+    const approx = entry.estimatedSize || best?.estimated || entry.kind === 'hls' || entry.kind === 'dash';
     meta.append(el('span', 'size-tag', `${approx ? '~' : ''}${formatBytes(size)}`));
-  } else if (entry.kind === 'hls' && probing.has(entry.id)) {
+  } else if ((entry.kind === 'hls' || entry.kind === 'dash') && probing.has(entry.id)) {
     meta.append(el('span', null, 'mengukur…'));
   }
 
@@ -264,8 +319,17 @@ function renderEntry(entry) {
 
   const actions = el('div', 'item-actions');
 
-  if (entry.kind === 'hls') {
-    const dl = btnIcon('Download', 'primary icon-btn', 'Unduh stream', 'Unduh');
+  if (entry.drm) {
+    const blocked = btnIcon('CrossCircled', 'ghost icon-btn', 'DRM — tidak bisa diunduh', 'DRM');
+    blocked.disabled = true;
+    actions.append(blocked);
+  } else if (entry.kind === 'hls' || entry.kind === 'dash') {
+    const dl = btnIcon(
+      'Download',
+      'primary icon-btn',
+      'Unduh kualitas terbaik',
+      primary ? 'Unduh terbaik' : 'Unduh'
+    );
     dl.addEventListener('click', () =>
       startDownload(entry.id, best?.url || null, best?.label || null, 'engine', best?.size)
     );
@@ -329,14 +393,21 @@ function renderEntry(entry) {
       const box = el('div', 'variants');
       for (const v of probe.variants) {
         const row = el('div', 'variant');
-        const label = el('span', null, v.label);
-        row.append(label);
+        row.append(el('span', 'quality-label', v.label));
         if (v.size) {
           row.append(el('span', 'variant-size', `${v.estimated ? '~' : ''}${formatBytes(v.size)}`));
         }
-        const b = btnIcon('Download', 'primary icon-btn', `Unduh ${v.label}`, 'Unduh');
-        b.addEventListener('click', () => startDownload(entry.id, v.url, v.label, 'engine', v.size));
-        row.append(b);
+        row.title = `Unduh ${v.label}`;
+        row.setAttribute('role', 'button');
+        row.tabIndex = 0;
+        const go = () => startDownload(entry.id, v.url, v.label, 'engine', v.size);
+        row.addEventListener('click', go);
+        row.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter' || ev.key === ' ') {
+            ev.preventDefault();
+            go();
+          }
+        });
         box.append(row);
       }
       item.append(box);
@@ -393,16 +464,25 @@ function renderDetail(entry, probe) {
 }
 
 function renderJobs(list) {
-  const active = list.filter((j) => j.status !== 'hidden');
-  jobsWrap.classList.toggle('hidden', active.length === 0);
+  const active = list.filter((j) => !['hidden', 'done', 'error', 'canceled'].includes(j.status));
+  jobsWrap.classList.remove('hidden');
+  jobsWrap.classList.toggle('is-empty', active.length === 0);
   jobsEl.replaceChildren();
 
-  for (const job of active) {
+  if (active.length === 0) {
+    jobsEl.append(el('p', 'jobs-empty', 'Buruan download'));
+    return;
+  }
+
+  const visible = showAllJobs ? active : active.slice(0, 2);
+
+  for (const job of visible) {
     const row = el('div', 'job');
     const top = el('div', 'job-top');
     top.append(el('span', 'job-name', job.nameBase));
 
     const statusText = {
+      pending: 'antrean',
       running: 'mengunduh',
       saving: 'menyimpan',
       paused: 'dijeda',
@@ -432,9 +512,8 @@ function renderJobs(list) {
     row.append(top);
 
     const p = job.progress || {};
-    const isHls = job.kind === 'hls';
-    // HLS diukur dari jumlah segmen, file progresif dari jumlah byte.
-    const ratio = isHls
+    const isSeg = job.kind === 'hls' || job.kind === 'dash';
+    const ratio = isSeg
       ? p.total
         ? p.completed / p.total
         : 0
@@ -451,12 +530,12 @@ function renderJobs(list) {
     }
 
     const metaBits = [];
-    if (isHls && p.total) metaBits.push(`${p.completed}/${p.total} segmen`);
+    if (isSeg && p.total) metaBits.push(`${p.completed}/${p.total} segmen`);
     if (p.bytes) {
-      const target = isHls ? job.estimatedBytes : p.total;
+      const target = isSeg ? job.estimatedBytes : p.total;
       metaBits.push(
         target
-          ? `${formatBytes(p.bytes)} / ${isHls ? '~' : ''}${formatBytes(target)}`
+          ? `${formatBytes(p.bytes)} / ${isSeg ? '~' : ''}${formatBytes(target)}`
           : formatBytes(p.bytes)
       );
     }
@@ -468,11 +547,34 @@ function renderJobs(list) {
       metaBits.push('dijeda');
     }
     if (job.error) metaBits.push(job.error);
+    if (job.status === 'done' && job.savedPath) {
+      metaBits.push(`simpan: ${job.savedPath}`);
+    }
     if (metaBits.length) row.append(el('div', 'job-meta', metaBits.join(' · ')));
+
+    if (job.status === 'done' && job.savedPath) {
+      const pathRow = el('div', 'job-path', job.savedPath);
+      const openBtn = btnIcon('Enter', 'ghost small icon-btn', 'Buka berkas di folder', 'Buka');
+      openBtn.addEventListener('click', () => send({ cmd: 'show-download', jobId: job.id }));
+      pathRow.append(openBtn);
+      row.append(pathRow);
+    }
 
     for (const w of job.warnings || []) row.append(el('div', 'note', w));
 
     jobsEl.append(row);
+  }
+
+  if (active.length > 2) {
+    const extra = active.length - 2;
+    const more = el('button', 'ghost jobs-more', showAllJobs ? 'Tampilkan lebih sedikit' : `Muat lebih banyak (${extra})`);
+    more.type = 'button';
+    more.addEventListener('click', () => {
+      showAllJobs = !showAllJobs;
+      lastRender = '';
+      refresh();
+    });
+    jobsEl.append(more);
   }
 }
 
@@ -487,7 +589,7 @@ const probing = new Set();
  */
 async function probePending(media) {
   const pending = media.filter(
-    (e) => e.kind === 'hls' && !probes.has(e.id) && !probing.has(e.id) && e.verified !== false
+    (e) => (e.kind === 'hls' || e.kind === 'dash') && !probes.has(e.id) && !probing.has(e.id) && e.verified !== false
   );
   for (const entry of pending.slice(0, 3)) {
     probing.add(entry.id);
@@ -606,17 +708,25 @@ async function refresh() {
     return;
   }
   if (!state) {
-    renderBanner('Service worker tidak merespons. Buka chrome://extensions → tombol Errors pada kartu StreamGrab.');
+    renderBanner('Service worker tidak merespons. Buka chrome://extensions → tombol Errors pada kartu Komang-streampull.');
     return;
   }
   renderBanner(state.startupErrors?.length ? `Gagal saat start: ${state.startupErrors.join(' | ')}` : '');
 
-  renderPreview(state.thumb);
+  const pill = $('#found-pill');
+  if (pill) {
+    pill.classList.toggle('hidden', !state.media.length);
+    pill.textContent = `${state.media.length} found`;
+  }
+  const foot = $('#save-foot');
+  if (foot) foot.textContent = `Auto-save → ${state.settings.downloadFolder || 'KSP'}/`;
+
+  if (!$('#preview-player')?.getAttribute('src')) showPreview({ thumb: state.thumb });
   void verifyPending(state.media).then(() => probePending(state.media));
 
   const signature = JSON.stringify({
     t: activeTab,
-    m: state.media.map((e) => [e.id, e.size, e.kind, e.verified, e.duration]),
+    m: state.media.map((e) => [e.id, e.size, e.kind, e.verified, e.duration, e.drm, e.rankScore]),
     b: [...probing],
     d: diagOpen,
     j: state.jobs.map((j) => [
@@ -628,16 +738,19 @@ async function refresh() {
       j.progress?.connections,
     ]),
     h: (state.history || []).map((x) => [x.id, x.status, x.finishedAt]),
-    s: [state.settings.downloadFolder, state.settings.askSaveLocation, state.settings.concurrency],
+    s: [state.settings.downloadFolder, state.settings.askSaveLocation, state.settings.concurrency, state.settings.queueConcurrency],
     p: [...probes.keys()],
     x: [...expanded],
+    a: showAllStreams,
+    aj: showAllJobs,
   });
   if (signature === lastRender) return;
   lastRender = signature;
 
+  renderJobs(state.jobs);
+
   if (activeTab === 'main') {
     renderMedia(state.media);
-    renderJobs(state.jobs);
     void renderDiagnostics(state.media.length);
   } else if (activeTab === 'history') {
     renderHistory(state.history);
@@ -650,12 +763,14 @@ function applySettings(s) {
   const folder = $('#set-folder');
   const ask = $('#set-ask-save');
   const conc = $('#conc');
+  const queueConc = $('#queue-conc');
   const hint = $('#save-hint');
-  if (document.activeElement !== folder) folder.value = s.downloadFolder || 'StreamGrab';
+  if (document.activeElement !== folder) folder.value = s.downloadFolder || 'KSP';
   if (document.activeElement !== ask) ask.checked = s.askSaveLocation === true;
   if (document.activeElement !== conc) conc.value = s.concurrency;
+  if (queueConc && document.activeElement !== queueConc) queueConc.value = s.queueConcurrency || 3;
   if (hint) {
-    const folder = s.downloadFolder || 'StreamGrab';
+    const folder = s.downloadFolder || 'KSP';
     hint.classList.toggle('warn', s.askSaveLocation === true);
     hint.textContent =
       s.askSaveLocation === true
@@ -673,8 +788,9 @@ function saveSettings(patch) {
 (async () => {
   try {
     initChromeIcons();
+    mountLogo();
   } catch (err) {
-    console.error('[StreamGrab popup]', err);
+    console.error('[KSP popup]', err);
     const box = el('div', 'banner err');
     box.textContent = `UI gagal init: ${err?.message || err}`;
     document.body.prepend(box);
@@ -699,13 +815,30 @@ function saveSettings(patch) {
     } catch {
       /* frame tanpa content script */
     }
-    // Beri waktu player memuat frame pertama, lalu ambil pratinjaunya.
-    setTimeout(() => send({ cmd: 'capture-thumb' }), 2000);
+  });
+
+  $('#btn-grab')?.addEventListener('click', async () => {
+    const grab = $('#btn-grab');
+    grab.disabled = true;
+    try {
+      const res = await send({ cmd: 'capture-thumb' });
+      lastThumbKey = null;
+      showPreview(res);
+      lastRender = '';
+      await refresh();
+    } catch {
+      lastThumbKey = null;
+      lastRender = '';
+      await refresh();
+    } finally {
+      grab.disabled = false;
+    }
   });
 
   $('#btn-clear').addEventListener('click', async () => {
     probes.clear();
     expanded.clear();
+    showAllStreams = false;
     await send({ cmd: 'clear-media' });
     lastRender = '';
     refresh();
@@ -729,7 +862,7 @@ function saveSettings(patch) {
   }
 
   $('#set-folder').addEventListener('change', (ev) => {
-    saveSettings({ downloadFolder: ev.target.value.trim() || 'StreamGrab' });
+    saveSettings({ downloadFolder: ev.target.value.trim() || 'KSP' });
   });
 
   $('#set-ask-save').addEventListener('change', (ev) => {
@@ -740,6 +873,12 @@ function saveSettings(patch) {
     const value = Math.max(1, Math.min(16, parseInt(ev.target.value, 10) || 6));
     ev.target.value = value;
     saveSettings({ concurrency: value });
+  });
+
+  $('#queue-conc')?.addEventListener('change', (ev) => {
+    const value = Math.max(1, Math.min(5, parseInt(ev.target.value, 10) || 3));
+    ev.target.value = value;
+    saveSettings({ queueConcurrency: value });
   });
 
   $('#btn-studio').addEventListener('click', () => {
@@ -755,8 +894,16 @@ function saveSettings(patch) {
     refresh();
   });
 
+  $('#btn-github')?.addEventListener('click', (ev) => {
+    ev.preventDefault();
+    chrome.tabs.create({ url: 'https://github.com/KomangKlomang' });
+  });
+
   // Minta pratinjau segar setiap kali panel dibuka.
-  send({ cmd: 'capture-thumb' });
+  send({ cmd: 'capture-thumb' }).then((res) => {
+    lastThumbKey = null;
+    showPreview(res);
+  });
 
   await refresh();
   setInterval(refresh, 700);

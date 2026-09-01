@@ -2,7 +2,7 @@
 // multi-koneksi dengan dynamic segmentation.
 import http from 'node:http';
 import nodeCrypto from 'node:crypto';
-import { downloadHls, downloadFile } from '../src/lib/downloader.js';
+import { downloadDash, downloadFile, downloadHls } from '../src/lib/downloader.js';
 import { downloadRanged, probeRange } from '../src/lib/accel.js';
 import { MemorySink } from '../src/lib/sink.js';
 
@@ -132,6 +132,26 @@ export default async function run({ check }) {
       return;
     }
 
+    if (p === '/manifest.mpd') {
+      const origin = 'http://127.0.0.1:' + server.address().port;
+      const body =
+        '<?xml version="1.0"?><MPD type="static" mediaPresentationDuration="PT20S"><Period>' +
+        '<AdaptationSet contentType="video" mimeType="video/mp4">' +
+        '<Representation id="v" bandwidth="1000" width="640" height="360">' +
+        `<SegmentTemplate timescale="1" duration="10" startNumber="1" initialization="${origin}/dinit.mp4" media="${origin}/dseg-$Number$.m4s"/>` +
+        '</Representation></AdaptationSet></Period></MPD>';
+      res.writeHead(200, { 'content-type': 'application/dash+xml' });
+      res.end(body);
+      return;
+    }
+
+    if (p === '/dinit.mp4' || p === '/dseg-1.m4s' || p === '/dseg-2.m4s') {
+      const buf = Buffer.from(p === '/dinit.mp4' ? 'INIT' : p.includes('1') ? 'SEG1' : 'SEG2');
+      res.writeHead(200, { 'content-type': 'video/mp4', 'content-length': buf.length });
+      res.end(buf);
+      return;
+    }
+
     res.writeHead(404).end();
   });
 
@@ -224,6 +244,13 @@ export default async function run({ check }) {
     check('diberi peringatan saat Range tidak didukung', noRange.warnings.some((w) => w.includes('Range')));
     check('MIME file progresif benar', noRange.blob.type === 'video/mp4', noRange.blob.type);
     supportRange = true;
+
+    const dash = await downloadDash({ url: base + '/manifest.mpd', concurrency: 2, sinkFactory: memSink });
+    check('DASH jadi mp4', dash.ext === 'mp4', dash.ext);
+    check(
+      'segmen DASH tersusun init+media',
+      Buffer.from(await dash.blob.arrayBuffer()).equals(Buffer.from('INITSEG1SEG2'))
+    );
 
     // ------------------------------------------------------------ pembatalan ---
     slowFirst = true;

@@ -1,6 +1,7 @@
 {
-  "name": "streamgrab",
-  "version": "1.0.0",
+  "name": "Komang-streampull",
+  "version": "2.0.0",
+  "description": "Komang-streampull (KSP) — deteksi & unduh stream video dari tab aktif",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,6 +9,7 @@
     "dev:preview": "node dev/server.mjs",
     "build": "wxt build",
     "zip": "wxt zip",
+    "pack": "npm run zip",
     "postinstall": "wxt prepare",
     "test": "node tests/run.mjs"
   },

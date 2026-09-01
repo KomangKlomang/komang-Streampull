@@ -2,7 +2,7 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "StreamGrab: WXT Dev",
+      "label": "KSP: WXT Dev",
       "type": "npm",
       "script": "dev",
       "problemMatcher": [],
@@ -13,7 +13,7 @@
       "isBackground": true
     },
     {
-      "label": "StreamGrab: UI Preview (mock)",
+      "label": "KSP: UI Preview (mock)",
       "type": "npm",
       "script": "dev:preview",
       "problemMatcher": [],

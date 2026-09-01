@@ -74,7 +74,7 @@ export class OpfsSink {
 
   static async create(name, mime) {
     const root = await navigator.storage.getDirectory();
-    const dir = await root.getDirectoryHandle('streamgrab', { create: true });
+    const dir = await root.getDirectoryHandle('govideo', { create: true });
     // Sisa dari job yang gagal sebelumnya tidak boleh ikut terbawa.
     await dir.removeEntry(name).catch(() => {});
     const handle = await dir.getFileHandle(name, { create: true });
@@ -145,7 +145,7 @@ export async function sweepOpfs(maxAgeMs = 2 * 60 * 60 * 1000) {
   let removed = 0;
   try {
     const root = await navigator.storage.getDirectory();
-    const dir = await root.getDirectoryHandle('streamgrab', { create: false });
+    const dir = await root.getDirectoryHandle('govideo', { create: false });
     const stale = [];
     for await (const [name, handle] of dir.entries()) {
       if (handle.kind !== 'file') continue;

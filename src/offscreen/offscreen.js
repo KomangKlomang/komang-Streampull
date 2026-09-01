@@ -1,12 +1,12 @@
 // Offscreen document: menjalankan unduhan yang berumur panjang.
 // Service worker boleh mati; dokumen ini tetap hidup sampai job selesai.
 
-import { downloadFile, downloadHls } from '../lib/downloader.js';
+import { downloadDash, downloadFile, downloadHls } from '../lib/downloader.js';
 import { sweepOpfs } from '../lib/sink.js';
 import { createPauseGate } from '../lib/util.js';
 
 void sweepOpfs().then((n) => {
-  if (n) console.info('[StreamGrab] membersihkan', n, 'berkas sementara');
+  if (n) console.info('[KSP] membersihkan', n, 'berkas sementara');
 });
 
 /** @type {Map<string, { ctrl: AbortController, pause: ReturnType<typeof createPauseGate> }>} */
@@ -58,7 +58,7 @@ async function run(job) {
   };
 
   try {
-    const runner = job.kind === 'hls' ? downloadHls : downloadFile;
+    const runner = job.kind === 'hls' ? downloadHls : job.kind === 'dash' ? downloadDash : downloadFile;
     const { blob, ext, warnings, cleanup } = await runner({
       url: job.url,
       concurrency: job.concurrency,
