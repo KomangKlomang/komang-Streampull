@@ -14,9 +14,10 @@ import { createPauseGate, hexToBytes, pathExt, sleep } from './util.js';
 const keyCache = new Map();
 
 async function loadKey(url, opts) {
+  const fb = opts?.fetchBytes || fetchBytes;
   if (keyCache.has(url)) return keyCache.get(url);
   const promise = (async () => {
-    const raw = await fetchBytes(url, opts);
+    const raw = await fb(url, opts);
     if (raw.byteLength !== 16) {
       throw new Error(`Panjang kunci AES tidak valid (${raw.byteLength} byte)`);
     }
@@ -79,26 +80,41 @@ export async function downloadHls(job) {
     sinkFactory = createSink,
     pauseGate = createPauseGate(),
   } = job;
+  const fetchTextFn = job.fetchText || ((u, o) => fetchText(u, o));
+  const fetchBytesFn = job.fetchBytes || ((u, o) => fetchBytes(u, o));
   const warnings = [];
 
   let playlistUrl = url;
-  let text = await fetchText(playlistUrl, { signal });
+  let text = await fetchTextFn(playlistUrl, { signal });
   let playlist = parseM3U8(text, playlistUrl);
 
   if (playlist.isMaster && playlist.variants.length) {
     const best = sortVariants(playlist.variants)[0];
     warnings.push('Master playlist terdeteksi — memakai kualitas tertinggi.');
     playlistUrl = best.url;
-    text = await fetchText(playlistUrl, { signal });
+    text = await fetchTextFn(playlistUrl, { signal });
     playlist = parseM3U8(text, playlistUrl);
   }
 
-  if (!playlist.segments.length) throw new Error('Playlist tidak berisi segmen.');
   if (playlist.live) {
-    warnings.push('Playlist live — hanya segmen yang tercantum saat ini yang diunduh.');
+    return downloadHlsLive({
+      playlistUrl,
+      playlist,
+      warnings,
+      signal,
+      onProgress,
+      sinkFactory,
+      pauseGate,
+      liveMaxMs: job.liveMaxMs,
+      fetchText: fetchTextFn,
+      fetchBytes: fetchBytesFn,
+      refreshUrl: job.refreshUrl,
+    });
   }
+
+  if (!playlist.segments.length) throw new Error('Playlist tidak berisi segmen.');
   if (playlist.encryption && playlist.encryption !== 'AES-128') {
-    throw new Error(`Enkripsi ${playlist.encryption} tidak didukung (hanya AES-128 clear-key).`);
+    throw new Error(`Enkripsi ${playlist.encryption} tidak didukung (hanya AES-128).`);
   }
 
   const { ext, mime } = outputFormat(playlist);
@@ -116,7 +132,7 @@ export async function downloadHls(job) {
   controller.start();
 
   if (playlist.map) {
-    const init = await fetchBytes(playlist.map.url, { signal, byterange: playlist.map.byterange });
+    const init = await fetchBytesFn(playlist.map.url, { signal, byterange: playlist.map.byterange });
     await sink.append(init);
     meter.add(init.byteLength);
   }
@@ -161,10 +177,10 @@ export async function downloadHls(job) {
 
   const fetchSegment = async (i) => {
     const seg = segments[i];
-    let data = await fetchBytes(seg.url, { signal, byterange: seg.byterange });
+    let data = await fetchBytesFn(seg.url, { signal, byterange: seg.byterange });
     meter.add(data.byteLength);
     if (seg.key?.method === 'AES-128' && seg.key.url) {
-      const key = await loadKey(seg.key.url, { signal });
+      const key = await loadKey(seg.key.url, { signal, fetchBytes: fetchBytesFn });
       data = await aesDecrypt(data, key, ivForSegment(seg));
     }
     return data;
@@ -211,6 +227,141 @@ export async function downloadHls(job) {
 
   report();
   const { blob, cleanup } = await sink.finish();
+  return { blob, ext, warnings, cleanup, duration: playlist.duration };
+}
+
+async function fetchHlsSegment(seg, signal, fetchBytesFn = fetchBytes) {
+  let data = await fetchBytesFn(seg.url, { signal, byterange: seg.byterange });
+  if (seg.key?.method === 'AES-128' && seg.key.url) {
+    const key = await loadKey(seg.key.url, { signal, fetchBytes: fetchBytesFn });
+    data = await aesDecrypt(data, key, ivForSegment(seg));
+  }
+  return data;
+}
+
+/**
+ * Live IDM-style: part baru digabung; berhenti saat idle ~24s, ENDLIST, atau batal.
+ * ponytail: liveMaxMs=0 = tanpa cap waktu; set >0 di settings kalau mau fuse manual.
+ */
+async function downloadHlsLive({
+  playlistUrl: startUrl,
+  playlist,
+  warnings,
+  signal,
+  onProgress,
+  sinkFactory,
+  pauseGate,
+  liveMaxMs = 0,
+  fetchText: fetchTextFn = fetchText,
+  fetchBytes: fetchBytesFn = fetchBytes,
+  refreshUrl,
+}) {
+  let playlistUrl = startUrl;
+  warnings.push(
+    'Rekaman live — part baru digabung otomatis. Berhenti saat stream habis atau kamu klik Batal.'
+  );
+  if (playlist.encryption && playlist.encryption !== 'AES-128') {
+    warnings.push(`Enkripsi ${playlist.encryption} — berkas mungkin tidak bisa diputar.`);
+  }
+
+  const pullPlaylist = async () => {
+    for (let i = 0; i < 5; i++) {
+      try {
+        const text = await fetchTextFn(playlistUrl, { signal });
+        return parseM3U8(text, playlistUrl);
+      } catch (err) {
+        const msg = String(err?.message || err);
+        if (refreshUrl && /404|403|410|HTTP|Gagal/i.test(msg)) {
+          const next = await refreshUrl();
+          if (next && next !== playlistUrl) {
+            playlistUrl = next;
+            warnings.push('URL playlist diperbarui (CDN signed).');
+            continue;
+          }
+        }
+        throw err;
+      }
+    }
+    throw new Error('Playlist live tidak bisa diambil');
+  };
+
+  for (let i = 0; i < 12 && !playlist.segments.length && !signal?.aborted; i++) {
+    await pauseGate.wait(signal);
+    await sleep(400, signal).catch(() => {});
+    playlist = await pullPlaylist();
+  }
+  if (!playlist.segments.length) throw new Error('Playlist live tidak berisi segmen.');
+
+  const { ext, mime } = outputFormat(playlist);
+  const sink = await sinkFactory({ mime, name: `hls-live-${Date.now()}.${ext}` });
+  if (playlist.map) {
+    const init = await fetchBytesFn(playlist.map.url, { signal, byterange: playlist.map.byterange });
+    await sink.append(init);
+  }
+
+  const seen = new Set();
+  const meter = new SpeedMeter();
+  let completed = 0;
+  let idlePolls = 0;
+  const started = Date.now();
+  const hasCap = liveMaxMs > 0;
+  // ponytail: 8 poll idle ≈ 24s tanpa part baru
+  const idleLimit = 8;
+
+  const report = () => {
+    onProgress({
+      completed,
+      total: completed,
+      bytes: sink.bytes,
+      bps: meter.bps,
+      eta: 0,
+      connections: 1,
+      duration: playlist.duration,
+      live: true,
+    });
+  };
+
+  try {
+    while (!signal?.aborted && (!hasCap || Date.now() - started < liveMaxMs)) {
+      await pauseGate.wait(signal);
+      let added = 0;
+      for (const seg of playlist.segments) {
+        const id = `${seg.seq}\0${seg.url}\0${seg.byterange?.offset ?? ''}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        try {
+          const data = await fetchHlsSegment(seg, signal, fetchBytesFn);
+          meter.add(data.byteLength);
+          await sink.append(data);
+          completed++;
+          added++;
+          report();
+        } catch (err) {
+          if (/404|403|410|HTTP/i.test(String(err?.message || err))) continue;
+          throw err;
+        }
+      }
+      if (!playlist.live && completed > 0) break;
+      if (added === 0) {
+        idlePolls++;
+        if (idlePolls >= idleLimit && completed > 0) break;
+      } else {
+        idlePolls = 0;
+      }
+      const wait = Math.max(500, Math.min(2500, (playlist.targetDuration || 2) * 500));
+      await sleep(wait, signal).catch(() => {});
+      if (signal?.aborted) break;
+      playlist = await pullPlaylist();
+    }
+  } catch (err) {
+    if (!(err?.name === 'AbortError' && completed > 0)) throw err;
+    warnings.push('Rekaman dihentikan — menyimpan file gabungan.');
+  }
+
+  report();
+  const { blob, cleanup } = await sink.finish();
+  if (!blob.size) throw new Error('Playlist live tidak berisi segmen.');
+  if (idlePolls >= idleLimit) warnings.push('Live berhenti — file final disimpan.');
   return { blob, ext, warnings, cleanup, duration: playlist.duration };
 }
 

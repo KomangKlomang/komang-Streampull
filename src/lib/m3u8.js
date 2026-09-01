@@ -1,7 +1,7 @@
 // Parser M3U8 (HLS) — cukup lengkap untuk master playlist, media playlist,
 // AES-128, byte-range, dan fMP4 (EXT-X-MAP).
 
-import { absUrl } from './util.js';
+import { absUrl, hostOf } from './util.js';
 
 /** Parse daftar atribut ala `KEY=VAL,KEY2="VAL 2"`. */
 export function parseAttrList(str) {
@@ -190,6 +190,22 @@ export function variantLabel(v) {
   else if (v.name) bits.push(v.name);
   if (v.bandwidth) bits.push(`${Math.round(v.bandwidth / 1000)} kbps`);
   return bits.join(' · ') || 'stream';
+}
+
+/** Semua host yang muncul di playlist (varian, segmen, kunci, init). */
+export function collectMediaHosts(playlist) {
+  const hosts = new Set();
+  const add = (url) => {
+    const h = hostOf(url);
+    if (h) hosts.add(h);
+  };
+  for (const v of playlist?.variants || []) add(v.url);
+  for (const s of playlist?.segments || []) {
+    add(s.url);
+    if (s.key?.url) add(s.key.url);
+  }
+  if (playlist?.map?.url) add(playlist.map.url);
+  return hosts;
 }
 
 /** Urut dari kualitas tertinggi ke terendah. */

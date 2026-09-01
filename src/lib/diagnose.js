@@ -8,7 +8,7 @@ export function diagnoseTab(d, mediaCount) {
   if (!frames) {
     return {
       level: 'bad',
-      text: 'Content script tidak berjalan. Muat ulang extension, lalu refresh halaman. chrome:// dan Web Store diblokir.',
+      text: 'Content script belum aktif — refresh halaman (F5). Wajib setelah reload extension.',
     };
   }
   if (!hooks) {

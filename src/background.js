@@ -1,9 +1,14 @@
 // Service worker: pusat deteksi media, manajemen aturan header, dan koordinasi job.
 
-import { parseM3U8, sortVariants, variantLabel } from './lib/m3u8.js';
-import { dashLabel, dashVariantUrl, parseMpd } from './lib/mpd.js';
+import { isBlockedUrl } from './lib/blocklist.js';
+import { scrapeMediaInPage } from './lib/dom-scrape.js';
+import { isSocialCdnUrl, isSocialHost, pickStoryEntry, storyMediaRole } from './lib/story-scrape.js';
+import { parseM3U8, sortVariants, variantLabel, collectMediaHosts } from './lib/m3u8.js';
+import { dashLabel, dashVariantUrl, parseMpd, collectDashHosts } from './lib/mpd.js';
 import { fetchText } from './lib/net.js';
-import { rankEntries } from './lib/rank.js';
+import { pickPrimaryEntry, rankEntries } from './lib/rank.js';
+import { analyzeHlsUrl, collapseMediaForDisplay, hlsBasePath, hlsStableId, isJunkHls } from './lib/hls-score.js';
+import { pingYtdlp, recordWithYtdlp } from './lib/ytdlp.js';
 import {
   hostOf,
   kindFromContentType,
@@ -28,6 +33,8 @@ const SETTINGS_DEFAULT = {
   keepPerTab: 60,
   downloadFolder: 'KSP',
   askSaveLocation: false,
+  ytdlpLive: true,
+  liveMaxMs: 0, // 0 = tanpa batas waktu; berhenti saat live idle / batal saja
 };
 
 const HISTORY_MAX = 200;
@@ -40,11 +47,11 @@ const registry = new Map();
 const jobs = new Map();
 /** URL -> header asli yang dipakai halaman saat meminta media itu. */
 const headerMemo = new Map();
+/** Header persis saat URL .m3u8 pertama kali terlihat — pola m3u8-grabber. */
+const urlHeaderMemo = new Map();
 /** tabId -> pratinjau video { dataUrl|url, width, height, duration } — memori saja. */
 const thumbs = new Map();
 let previewRuleId = null;
-/** tabId -> key system EME yang terdeteksi di halaman itu. */
-const tabDrm = new Map();
 /** tabId -> catatan diagnostik: apa yang dilihat engine dan apa yang dibuang. */
 const diagnostics = new Map();
 
@@ -301,11 +308,18 @@ async function findDownloadId(msg) {
   }
 }
 
+async function tabPageUrl(tabId) {
+  if (tabId == null) return '';
+  try {
+    return (await chrome.tabs.get(tabId))?.url || '';
+  } catch {
+    return '';
+  }
+}
+
 async function resolvePlayUrl(tabId) {
-  const list = rankEntries([...(registry.get(tabId)?.values() || [])]).filter(
-    (e) => !e.drm && e.verified !== false
-  );
-  const entry = list.find((e) => e.kind === 'file') || list[0];
+  if (isBlockedUrl(await tabPageUrl(tabId))) return null;
+  const entry = pickPrimaryEntry([...(registry.get(tabId)?.values() || [])]);
   if (!entry) return null;
   let url = pickDownloadUrl(entry, tabId);
   let headers = await headersForDownload(entry, url);
@@ -342,6 +356,43 @@ async function pingFrames(tabId, cmd) {
       /* tidak ada content script */
     }
   }
+}
+
+/** Sapuan DOM all-frames — pola blob video downloader. */
+async function scrapeTabDom(tabId) {
+  if (tabId == null || tabId < 0) return 0;
+  if (isBlockedUrl(await tabPageUrl(tabId))) return 0;
+  let added = 0;
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId, allFrames: true },
+      func: scrapeMediaInPage,
+    });
+    const pageUrl = tabPage.get(tabId) || (await tabPageUrl(tabId));
+    for (const res of results || []) {
+      for (const item of res.result || []) {
+        const kind = kindFromUrl(item.url);
+        if (!kind) continue;
+        addEntry({
+          url: item.url,
+          kind,
+          tabId,
+          pageUrl,
+          pageTitle: item.title || '',
+          source: item.source || 'dom-scrape',
+          playing: item.source === 'playing',
+          headers: {
+            referer: pageUrl,
+            origin: pageUrl ? originOf(pageUrl) : '',
+          },
+        });
+        added++;
+      }
+    }
+  } catch {
+    /* chrome://, PDF viewer, dll */
+  }
+  return added;
 }
 
 async function captureTabStill(tabId) {
@@ -395,15 +446,26 @@ function entriesFor(tabId) {
 }
 
 function updateBadge(tabId) {
-  const n = registry.get(tabId)?.size || 0;
+  const raw = [...(registry.get(tabId)?.values() || [])];
+  const n = collapseMediaForDisplay(raw).length;
   chrome.action.setBadgeBackgroundColor({ color: '#6366f1' });
   chrome.action.setBadgeText({ tabId, text: n ? String(Math.min(n, 99)) : '' }).catch(() => {});
 }
 
 function addEntry(entry) {
   if (entry.tabId == null || entry.tabId < 0) return;
+  if (isBlockedUrl(entry.url) || isBlockedUrl(entry.pageUrl) || isBlockedUrl(entry.frameUrl)) return;
+  if (entry.kind === 'hls' && isJunkHls(entry)) return;
+
   const map = entriesFor(entry.tabId);
-  const id = shortHash(entry.url);
+  let id = shortHash(entry.url);
+  if (entry.kind === 'hls') {
+    id = hlsStableId(entry.url, shortHash);
+    const base = hlsBasePath(entry.url);
+    for (const [oldId, e] of map) {
+      if (oldId !== id && e.kind === 'hls' && hlsBasePath(e.url) === base) map.delete(oldId);
+    }
+  }
   const prev = map.get(id);
   const merged = {
     id,
@@ -417,16 +479,26 @@ function addEntry(entry) {
     pageTitle: entry.pageTitle || prev?.pageTitle || '',
     pageUrl: entry.pageUrl || prev?.pageUrl || '',
     headers: { ...(prev?.headers || {}), ...(entry.headers || {}) },
-    drm: Boolean(entry.drm || prev?.drm || tabDrm.has(entry.tabId)),
-    drmSystem: entry.drmSystem || prev?.drmSystem || tabDrm.get(entry.tabId) || '',
+    drm: Boolean(entry.drm || prev?.drm),
+    drmSystem: entry.drmSystem || prev?.drmSystem || '',
     playing: Boolean(entry.playing || prev?.playing || entry.source === 'playing'),
     lastSeen: Date.now(),
   };
   map.set(id, merged);
+  if (merged.kind === 'hls') {
+    const a = analyzeHlsUrl(merged.url);
+    merged.hlsAnalysis = a;
+    merged.hlsScore = a.score;
+    map.set(id, merged);
+  }
 
   // batasi jumlah entri per tab
   if (map.size > settings.keepPerTab) {
-    const oldest = [...map.values()].sort((a, b) => a.lastSeen - b.lastSeen)[0];
+    const oldest =
+      [...map.values()]
+        .filter((e) => storyMediaRole(e.url) !== 'video')
+        .sort((a, b) => a.lastSeen - b.lastSeen)[0] ||
+      [...map.values()].sort((a, b) => a.lastSeen - b.lastSeen)[0];
     if (oldest) map.delete(oldest.id);
   }
 
@@ -438,14 +510,13 @@ function clearTab(tabId) {
   registry.delete(tabId);
   thumbs.delete(tabId);
   diagnostics.delete(tabId);
-  tabDrm.delete(tabId);
   updateBadge(tabId);
   schedulePersist();
 }
 
 // -------------------------------------------------------------- webRequest ---
 
-const WATCHED_TYPES = ['xmlhttprequest', 'media', 'other', 'object', 'sub_frame'];
+const WATCHED_TYPES = ['xmlhttprequest', 'media', 'other', 'object', 'sub_frame', 'image'];
 
 function headerValue(list, name) {
   const found = list?.find((h) => h.name.toLowerCase() === name);
@@ -473,6 +544,7 @@ function memoHeaders(d) {
 
   const rec = { referer, origin, userAgent, cookie };
   headerMemo.set(host, rec);
+  if (/\.m3u8(?:[?#]|$)/i.test(d.url)) urlHeaderMemo.set(d.url, rec);
   schedulePersist();
 
   // MV3 tidak mendukung extraHeaders — ambil Cookie lewat chrome.cookies API.
@@ -498,10 +570,14 @@ function memoHeaders(d) {
 /** @type {Map<string, number>} origin -> tabId */
 const originToTab = new Map();
 
+/** @type {Map<number, string>} tabId -> URL halaman aktif */
+const tabPage = new Map();
+
 function indexTab(tab) {
   if (!tab || tab.id == null || tab.id < 0) return;
   const origin = originOf(tab.url || '');
   if (origin && /^https?:/.test(origin)) originToTab.set(origin, tab.id);
+  if (tab.url && /^https?:/.test(tab.url)) tabPage.set(tab.id, tab.url);
 }
 
 safe('tabs index', () => {
@@ -524,7 +600,8 @@ safe('webRequest.onBeforeRequest', () =>
     (d) => {
       d = { ...d, tabId: resolveTabId(d, originToTab) };
       if (d.tabId < 0) return;
-      if (SEGMENT_URL_RE.test(d.url)) return;
+      if (d.type === 'image' && !isSocialCdnUrl(d.url)) return;
+      if (SEGMENT_URL_RE.test(d.url) && !isSocialCdnUrl(d.url)) return;
       const kind = kindFromUrl(d.url);
       if (!kind) return;
       // FILE ditunda ke onHeadersReceived — URL .mp4 bisa jadi halaman HTML.
@@ -541,6 +618,7 @@ safe('webRequest.onHeadersReceived', () =>
     (d) => {
       d = { ...d, tabId: resolveTabId(d, originToTab) };
       if (d.tabId < 0) return;
+      if (d.type === 'image' && !isSocialCdnUrl(d.url)) return;
       const diag = diagFor(d.tabId);
       diag.responses++;
       const ct = headerValue(d.responseHeaders, 'content-type');
@@ -548,7 +626,7 @@ safe('webRequest.onHeadersReceived', () =>
         logDiag(d.tabId, 'bukan berkas media', `${ct} — ${d.url}`);
         return;
       }
-      const kind = kindFromContentType(ct) || kindFromUrl(d.url);
+      const kind = kindFromContentType(ct) || kindFromUrl(d.url) || (isSocialCdnUrl(d.url) && /^image\//i.test(ct) ? 'file' : null);
       if (!kind) {
         // Tipe yang samar sering menyembunyikan playlist — layak dilaporkan.
         if (/video|mpegurl|octet-stream|dash|mp2t/i.test(ct)) {
@@ -556,12 +634,13 @@ safe('webRequest.onHeadersReceived', () =>
         }
         return;
       }
-      if (kind === 'file' && SEGMENT_URL_RE.test(d.url)) {
+      if (kind === 'file' && SEGMENT_URL_RE.test(d.url) && !isSocialCdnUrl(d.url)) {
         logDiag(d.tabId, 'dianggap potongan segmen', d.url);
         return;
       }
       const size = parseInt(headerValue(d.responseHeaders, 'content-length') || '0', 10) || 0;
-      if (kind === 'file' && size && size < settings.minFileSize) {
+      const minSize = isSocialCdnUrl(d.url) ? 20 * 1024 : settings.minFileSize;
+      if (kind === 'file' && size && size < minSize) {
         logDiag(d.tabId, 'di bawah ukuran minimum', `${size} B — ${d.url}`);
         return;
       }
@@ -574,23 +653,45 @@ safe('webRequest.onHeadersReceived', () =>
 );
 
 function record(d, kind, contentType, size) {
+  if (isBlockedUrl(d.url) || isBlockedUrl(d.initiator) || isBlockedUrl(d.documentUrl)) return;
   const host = hostOf(d.url);
+  const pageUrl = tabPage.get(d.tabId) || '';
+  const urlMemo = urlHeaderMemo.get(d.url) || {};
+  const memo = { ...(headerMemo.get(host) || {}), ...urlMemo };
   addEntry({
     url: d.url,
     kind,
     tabId: d.tabId,
     frameUrl: d.documentUrl || d.initiator || '',
+    pageUrl,
     contentType,
     size,
     source: 'network',
-    headers: headerMemo.get(host) || {},
+    headers: {
+      referer: memo.referer || pageUrl || d.documentUrl || d.initiator || '',
+      origin: memo.origin || (pageUrl ? originOf(pageUrl) : ''),
+      cookie: memo.cookie || '',
+      userAgent: memo.userAgent || '',
+    },
   });
 }
 
-// Bersihkan daftar saat tab pindah halaman.
+// Bersihkan daftar saat tab pindah halaman (bukan reload URL yang sama).
+function navBase(url) {
+  try {
+    const u = new URL(url);
+    return u.origin + u.pathname;
+  } catch {
+    return url || '';
+  }
+}
+
 safe('tabs.onUpdated', () =>
   chrome.tabs.onUpdated.addListener((tabId, info) => {
-    if (info.status === 'loading' && info.url) clearTab(tabId);
+    if (info.status !== 'loading' || !info.url) return;
+    const prev = tabPage.get(tabId);
+    if (prev && navBase(prev) === navBase(info.url)) return;
+    clearTab(tabId);
   })
 );
 safe('tabs.onRemoved', () => chrome.tabs.onRemoved.addListener((tabId) => clearTab(tabId)));
@@ -610,14 +711,14 @@ function nextRuleId() {
  * Pasang aturan yang menulis ulang Referer/Origin/Cookie untuk permintaan
  * yang berasal dari extension sendiri (tabId -1), bukan dari tab manapun.
  */
-async function addHeaderRule(url, headers = {}) {
-  const host = hostOf(url);
+async function addHeaderRuleForHost(host, headers = {}) {
   if (!host) return null;
 
   const build = (withCookie) => {
     const requestHeaders = [];
     if (headers.referer) requestHeaders.push({ header: 'referer', operation: 'set', value: headers.referer });
     if (headers.origin) requestHeaders.push({ header: 'origin', operation: 'set', value: headers.origin });
+    if (headers.userAgent) requestHeaders.push({ header: 'user-agent', operation: 'set', value: headers.userAgent });
     if (withCookie && headers.cookie) requestHeaders.push({ header: 'cookie', operation: 'set', value: headers.cookie });
     return requestHeaders;
   };
@@ -651,10 +752,127 @@ async function addHeaderRule(url, headers = {}) {
   return null;
 }
 
-async function removeHeaderRule(id) {
-  if (id == null) return;
+async function addHeaderRule(url, headers = {}) {
+  return addHeaderRuleForHost(hostOf(url), headers);
+}
+
+async function addHeaderRules(hosts, headers = {}) {
+  const ids = [];
+  for (const host of [...new Set(hosts.filter(Boolean))]) {
+    const id = await addHeaderRuleForHost(host, headers);
+    if (id != null) ids.push(id);
+  }
+  return ids;
+}
+
+/** Semua fetch extension (offscreen) dapat Referer halaman — menutupi CDN tak terduga. */
+// ponytail: konflik referer jika banyak job engine paralel beda tab; naikkan queueConcurrency hati-hati.
+async function addCatchAllHeaderRule(headers = {}) {
+  const build = (withCookie) => {
+    const requestHeaders = [];
+    if (headers.referer) requestHeaders.push({ header: 'referer', operation: 'set', value: headers.referer });
+    if (headers.origin) requestHeaders.push({ header: 'origin', operation: 'set', value: headers.origin });
+    if (headers.userAgent) requestHeaders.push({ header: 'user-agent', operation: 'set', value: headers.userAgent });
+    if (withCookie && headers.cookie) requestHeaders.push({ header: 'cookie', operation: 'set', value: headers.cookie });
+    return requestHeaders;
+  };
+
+  for (const withCookie of [true, false]) {
+    const requestHeaders = build(withCookie);
+    if (!requestHeaders.length) return null;
+    const id = nextRuleId();
+    const rule = {
+      id,
+      priority: 110,
+      action: { type: 'modifyHeaders', requestHeaders },
+      condition: {
+        regexFilter: '^https?://',
+        tabIds: [chrome.tabs.TAB_ID_NONE],
+        resourceTypes: ['xmlhttprequest', 'media', 'other'],
+      },
+    };
+    try {
+      await chrome.declarativeNetRequest.updateSessionRules({
+        removeRuleIds: [id],
+        addRules: [rule],
+      });
+      return id;
+    } catch (err) {
+      if (!withCookie) {
+        console.warn('[KSP] catch-all header rule gagal:', err);
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+async function tabFetchViaTab(tabId, { url, mode, byterange }) {
+  if (tabId == null || tabId < 0) return { ok: false, error: 'Tab tidak valid' };
   try {
-    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [id] });
+    const res = await chrome.tabs.sendMessage(tabId, { cmd: 'tab-fetch', url, mode, byterange });
+    if (res?.ok) return res;
+    return { ok: false, error: res?.error || 'Content script tidak merespons — refresh halaman (F5)' };
+  } catch (err) {
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+async function fetchEngineText(url, tabId) {
+  if (tabId != null && tabId >= 0) {
+    const r = await tabFetchViaTab(tabId, { url, mode: 'text' });
+    if (r?.ok && r.text != null) return r.text;
+  }
+  return fetchText(url, { retries: 2 });
+}
+
+/** URL m3u8 terbaru untuk stream yang sama (signed CDN TikTok). */
+function freshStreamUrl(tabId, entry) {
+  if (!entry?.url || tabId == null) return entry?.url || null;
+  const base = entry.kind === 'hls' ? hlsBasePath(entry.url) : entry.url.replace(/[?#].*$/, '');
+  let best = entry;
+  for (const e of registry.get(tabId)?.values() || []) {
+    if (e.kind !== entry.kind || e.drm) continue;
+    const same =
+      entry.kind === 'hls' ? hlsBasePath(e.url) === base : e.url.replace(/[?#].*$/, '') === base;
+    if (!same) continue;
+    if ((e.lastSeen || 0) >= (best.lastSeen || 0)) best = e;
+  }
+  return best.url;
+}
+
+/** Host CDN segmen/kunci — DNR perlu satu aturan per host, bukan cuma playlist. */
+async function discoverEngineHosts(url, kind, headers, tabId) {
+  const hosts = new Set([hostOf(url)].filter(Boolean));
+  const bootstrap = await addHeaderRule(url, headers);
+  if (!bootstrap) return [...hosts];
+  try {
+    if (kind === 'hls') {
+      let pl = parseM3U8(await fetchEngineText(url, tabId), url);
+      for (const h of collectMediaHosts(pl)) hosts.add(h);
+      if (pl.isMaster && pl.variants.length) {
+        const mediaUrl = sortVariants(pl.variants)[0].url;
+        hosts.add(hostOf(mediaUrl));
+        pl = parseM3U8(await fetchEngineText(mediaUrl, tabId), mediaUrl);
+        for (const h of collectMediaHosts(pl)) hosts.add(h);
+      }
+    } else if (kind === 'dash') {
+      const mpd = parseMpd(await fetchEngineText(url.replace(/#.*$/, ''), tabId), url);
+      for (const h of collectDashHosts(mpd)) hosts.add(h);
+    }
+  } catch (err) {
+    console.warn('[KSP] discoverEngineHosts:', err);
+  } finally {
+    await removeHeaderRule(bootstrap);
+  }
+  return [...hosts];
+}
+
+async function removeHeaderRule(idOrIds) {
+  const ids = idOrIds == null ? [] : Array.isArray(idOrIds) ? idOrIds : [idOrIds];
+  if (!ids.length) return;
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: ids });
   } catch {
     /* sudah hilang */
   }
@@ -727,43 +945,65 @@ async function estimatePlaylistBytes(playlist) {
 /** Header terbaik yang kita ketahui untuk sebuah URL media. */
 function headersFor(entry, targetUrl = entry.url) {
   const host = hostOf(targetUrl);
+  const urlMemo = urlHeaderMemo.get(targetUrl) || {};
   const memo = headerMemo.get(host) || {};
-  const referer =
-    entry.headers?.referer || memo.referer || entry.frameUrl || entry.pageUrl || '';
+  const pageRef = entry.pageUrl || entry.frameUrl || '';
+  const referer = entry.headers?.referer || urlMemo.referer || memo.referer || pageRef || '';
   return {
     referer,
-    origin: entry.headers?.origin || memo.origin || (referer ? originOf(referer) : ''),
-    cookie: memo.cookie || entry.headers?.cookie || '',
-    userAgent: entry.headers?.userAgent || memo.userAgent || navigator.userAgent,
+    origin: entry.headers?.origin || urlMemo.origin || memo.origin || (referer ? originOf(referer) : ''),
+    cookie: entry.headers?.cookie || urlMemo.cookie || memo.cookie || '',
+    userAgent: entry.headers?.userAgent || urlMemo.userAgent || memo.userAgent || navigator.userAgent,
   };
 }
 
-/** Lengkapi Cookie dari chrome.cookies bila webRequest tidak menyediakannya (MV3). */
+function mergeCookieHeader(existing, cookies) {
+  const seen = new Set();
+  const parts = [];
+  for (const chunk of String(existing || '').split(';')) {
+    const name = chunk.trim().split('=')[0];
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    parts.push(chunk.trim());
+  }
+  for (const c of cookies) {
+    if (!c?.name || seen.has(c.name)) continue;
+    seen.add(c.name);
+    parts.push(`${c.name}=${c.value}`);
+  }
+  return parts.join('; ');
+}
+
+/** Lengkapi Cookie dari chrome.cookies — CDN + halaman asal (TikTok session di tiktok.com). */
 async function headersForDownload(entry, targetUrl = entry.url) {
   const headers = headersFor(entry, targetUrl);
-  if (headers.cookie) return headers;
-  try {
-    const cookies = await chrome.cookies.getAll({ url: targetUrl });
-    if (cookies.length) {
-      headers.cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+  const bases = [targetUrl, entry.pageUrl, entry.frameUrl, headers.referer].filter(Boolean);
+  let merged = headers.cookie || '';
+  for (const base of [...new Set(bases)]) {
+    try {
+      const url = /^https?:/.test(base) ? base : `https://${base}`;
+      const cookies = await chrome.cookies.getAll({ url });
+      if (cookies.length) merged = mergeCookieHeader(merged, cookies);
+    } catch {
+      /* abaikan */
     }
-  } catch {
-    /* abaikan */
   }
+  if (merged) headers.cookie = merged;
   return headers;
 }
 
 async function probeDash(entry) {
   const mpdUrl = String(entry.url || '').replace(/#.*$/, '');
   const headers = await headersForDownload(entry, mpdUrl);
-  const ruleId = await addHeaderRule(mpdUrl, headers);
+  const hosts = await discoverEngineHosts(mpdUrl, 'dash', headers);
+  const ruleIds = await addHeaderRules(hosts, headers);
   try {
     const text = await fetchText(mpdUrl, { retries: 2 });
     const mpd = parseMpd(text, mpdUrl);
     const warnings = [];
     if (mpd.live) warnings.push('DASH live tidak didukung.');
     if (mpd.drm) {
-      warnings.push('DRM terdeteksi — unduhan dinonaktifkan.');
+      warnings.push('DRM terdeteksi — unduhan mungkin tidak bisa diputar.');
       entry.drm = true;
     }
     if (mpd.multiPeriod) warnings.push('MPD multi-period — hanya period pertama.');
@@ -807,7 +1047,7 @@ async function probeDash(entry) {
       warnings,
     };
   } finally {
-    await removeHeaderRule(ruleId);
+    await removeHeaderRule(ruleIds);
   }
 }
 
@@ -896,7 +1136,8 @@ async function pumpQueue() {
     job.status = 'running';
     saveJob(job);
     try {
-      if (job.mode === 'direct') await startDirectDownload(job);
+      if (job.mode === 'ytdlp') await startYtdlpDownload(job);
+      else if (job.mode === 'direct') await startDirectDownload(job);
       else await startEngineDownload(job);
     } catch (err) {
       job.status = 'error';
@@ -952,10 +1193,126 @@ async function unwrapPlayerPage(url) {
   }
 }
 
-async function startDownload({ entryId, tabId, variantUrl, label, mode, estimatedBytes }) {
+async function peekSocialHead(url) {
+  const ctrl = new AbortController();
+  try {
+    const res = await fetch(url, {
+      headers: { Range: 'bytes=0-31' },
+      credentials: 'include',
+      cache: 'no-store',
+      signal: ctrl.signal,
+    });
+    const ct = (res.headers.get('content-type') || '').toLowerCase();
+    const reader = res.body?.getReader();
+    const buf = new Uint8Array(32);
+    let n = 0;
+    if (reader) {
+      while (n < 32) {
+        const { done, value } = await reader.read();
+        if (done || !value) break;
+        buf.set(value.subarray(0, 32 - n), n);
+        n += value.length;
+      }
+      try {
+        ctrl.abort();
+        await reader.cancel();
+      } catch {
+        /* sudah ditutup */
+      }
+    }
+    const ascii = String.fromCharCode(...buf.subarray(0, Math.min(16, n))).trimStart();
+    if (/html|json|xml|text\/plain/.test(ct) || ascii.startsWith('<') || ascii.startsWith('{')) {
+      return { junk: true, ext: '' };
+    }
+    if (buf[0] === 0xff && buf[1] === 0xd8) return { junk: false, ext: 'jpg' };
+    if (buf[0] === 0x89 && buf[1] === 0x50) return { junk: false, ext: 'png' };
+    if (ascii.startsWith('RIFF')) return { junk: false, ext: 'webp' };
+    if (ascii.includes('ftyp') || (buf[4] === 0x66 && buf[5] === 0x74)) return { junk: false, ext: 'mp4' };
+    if (ct.startsWith('image/jpeg')) return { junk: false, ext: 'jpg' };
+    if (ct.startsWith('image/')) return { junk: false, ext: 'jpg' };
+    if (ct.startsWith('video/')) return { junk: false, ext: 'mp4' };
+    return { junk: false, ext: '' };
+  } catch {
+    return { junk: false, ext: '' };
+  }
+}
+
+async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false, hint = '') {
+  const tabUrl = (await tabPageUrl(tabId)) || pageUrl;
+  if (!force && (isBlockedUrl(tabUrl) || isBlockedUrl(pageUrl) || isBlockedUrl(videoUrl))) {
+    throw new Error('Situs ini ada di daftar opt-out. Unduhan dinonaktifkan.');
+  }
+  const social =
+    isSocialHost(hostOf(tabUrl)) || isSocialHost(hostOf(pageUrl)) || isSocialCdnUrl(videoUrl);
+  if (social) {
+    const want = hint === 'image' ? 'image' : 'video';
+    if (videoUrl && /^https?:/i.test(videoUrl) && storyMediaRole(videoUrl) === want) {
+      addEntry({
+        url: videoUrl,
+        kind: 'file',
+        tabId,
+        pageUrl: pageUrl || tabUrl,
+        source: 'playing',
+        playing: true,
+      });
+    }
+    const entry = pickStoryEntry([...(registry.get(tabId)?.values() || [])], want);
+    if (!entry) {
+      throw new Error('Belum ada URL media asli. Buka/putar story sampai jalan, lalu klik lagi.');
+    }
+    return startDownload({
+      entryId: entry.id,
+      tabId,
+      mode: 'direct',
+      force: true,
+    });
+  }
+  if (videoUrl && /^https?:/i.test(videoUrl)) {
+    const kind = kindFromUrl(videoUrl) || (isSocialCdnUrl(videoUrl) ? 'file' : null);
+    if (kind) {
+      addEntry({
+        url: videoUrl,
+        kind,
+        tabId,
+        pageUrl: pageUrl || tabUrl,
+        source: 'playing',
+        playing: true,
+      });
+      const hit = [...(registry.get(tabId)?.values() || [])].find((e) => e.url === videoUrl);
+      if (hit) {
+        return startDownload({
+          entryId: hit.id,
+          tabId,
+          mode: hit.kind === 'file' ? 'direct' : 'engine',
+          force,
+        });
+      }
+    }
+  }
+  const entry = pickPrimaryEntry([...(registry.get(tabId)?.values() || [])], { allowDrm: true });
+  if (!entry) throw new Error('Belum ada stream. Putar videonya sebentar, lalu klik lagi.');
+  return startDownload({
+    entryId: entry.id,
+    tabId,
+    mode: entry.kind === 'file' ? 'direct' : 'engine',
+    force,
+  });
+}
+
+async function startDownload({ entryId, tabId, variantUrl, label, mode, estimatedBytes, force }) {
   const entry = registry.get(tabId)?.get(entryId);
   if (!entry) throw new Error('Media tidak ditemukan lagi — muat ulang halaman.');
-  if (entry.drm) throw new Error('Stream terlindungi DRM — tidak bisa diunduh.');
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab?.url && /^https?:/.test(tab.url) && !entry.pageUrl) {
+    entry.pageUrl = tab.url;
+    schedulePersist();
+  }
+  if (entry.drm && !force) {
+    throw new Error('Stream terlindungi DRM — tidak bisa diunduh.');
+  }
+  if (!force && (isBlockedUrl(entry.url) || isBlockedUrl(entry.pageUrl) || isBlockedUrl(entry.frameUrl))) {
+    throw new Error('Situs ini ada di daftar opt-out. Unduhan dinonaktifkan.');
+  }
 
   const existing = [...jobs.values()].find(
     (j) => j.entryId === entryId && ['pending', 'running', 'saving', 'paused'].includes(j.status)
@@ -963,6 +1320,10 @@ async function startDownload({ entryId, tabId, variantUrl, label, mode, estimate
   if (existing) return existing.id;
 
   let targetUrl = variantUrl || pickDownloadUrl(entry, tabId);
+  // URL signed (TikTok live) cepat kadaluarsa — pakai m3u8/mpd terbaru di tab yang sama.
+  if (!variantUrl && (entry.kind === 'hls' || entry.kind === 'dash')) {
+    targetUrl = freshStreamUrl(tabId, entry) || targetUrl;
+  }
   let headers = await headersForDownload(entry, targetUrl.replace(/#rep=.*$/, ''));
   if (!variantUrl && entry.kind === 'file') {
     const ruleId = await addHeaderRule(targetUrl, headers);
@@ -982,7 +1343,6 @@ async function startDownload({ entryId, tabId, variantUrl, label, mode, estimate
     (j) => j.url === targetUrl && ['pending', 'running', 'saving', 'paused'].includes(j.status)
   );
   if (already) return already.id;
-  const tab = await chrome.tabs.get(tabId).catch(() => null);
   const base = sanitizeFilename(
     tab?.title || entry.pageTitle || hostOf(entry.frameUrl || entry.url),
     'video'
@@ -995,7 +1355,10 @@ async function startDownload({ entryId, tabId, variantUrl, label, mode, estimate
     tabId,
     url: targetUrl,
     kind: entry.kind,
-    mode: mode || (entry.kind === 'file' ? 'direct' : 'engine'),
+    mode:
+      entry.kind === 'hls' && settings.ytdlpLive !== false
+        ? 'ytdlp'
+        : mode || (entry.kind === 'file' ? 'direct' : 'engine'),
     nameBase,
     status: 'pending',
     startedAt: Date.now(),
@@ -1003,6 +1366,7 @@ async function startDownload({ entryId, tabId, variantUrl, label, mode, estimate
     progress: { completed: 0, total: 0, bytes: 0 },
     warnings: [],
     headers,
+    liveMaxMs: entry.kind === 'hls' ? settings.liveMaxMs ?? 0 : undefined,
   };
   saveJob(job);
   await pumpQueue();
@@ -1012,7 +1376,20 @@ async function startDownload({ entryId, tabId, variantUrl, label, mode, estimate
 /** Jalur cepat: chrome.downloads menstream langsung ke disk (tanpa batas memori). */
 async function startDirectDownload(job) {
   job.ruleId = await addHeaderRule(job.url, job.headers);
-  const ext = (job.url.match(/\.([a-z0-9]{2,4})(?:$|[?#])/i)?.[1] || 'mp4').toLowerCase();
+  let ext = (job.url.match(/\.([a-z0-9]{2,4})(?:$|[?#])/i)?.[1] || 'mp4').toLowerCase();
+  if (isSocialCdnUrl(job.url)) {
+    const peek = await peekSocialHead(job.url);
+    if (peek.junk) {
+      await removeHeaderRule(job.ruleIds || job.ruleId);
+      job.status = 'error';
+      job.error = 'CDN mengembalikan HTML/JSON, bukan media. Putar story-nya, lalu klik lagi.';
+      saveJob(job);
+      return;
+    }
+    if (peek.ext) ext = peek.ext;
+    else if (storyMediaRole(job.url) === 'image') ext = 'jpg';
+    else if (storyMediaRole(job.url) === 'video') ext = 'mp4';
+  }
   const savedPath = downloadFilename(job.nameBase, ext);
   job.savedPath = savedPath;
   try {
@@ -1020,16 +1397,49 @@ async function startDirectDownload(job) {
     job.status = 'saving';
     saveJob(job);
   } catch (err) {
-    await removeHeaderRule(job.ruleId);
+    await removeHeaderRule(job.ruleIds || job.ruleId);
     job.status = 'error';
     job.error = String(err?.message || err);
     saveJob(job);
   }
 }
 
+/** Live HLS via yt-dlp native host — fallback ke engine jika belum terdaftar. */
+async function startYtdlpDownload(job) {
+  const ping = await pingYtdlp();
+  if (!ping?.success) {
+    job.warnings.push('Native yt-dlp belum terdaftar — pakai unduhan in-browser.');
+    job.mode = 'engine';
+    return startEngineDownload(job);
+  }
+
+  const folder = sanitizeDownloadFolder(settings.downloadFolder || 'KSP');
+  const res = await recordWithYtdlp({
+    url: job.url,
+    filename: job.nameBase,
+    outputDir: `%USERPROFILE%\\Downloads\\${folder}`,
+    headers: job.headers,
+  });
+
+  if (!res.success) {
+    job.warnings.push(`yt-dlp: ${res.error} — fallback in-browser.`);
+    job.mode = 'engine';
+    return startEngineDownload(job);
+  }
+
+  job.status = 'done';
+  job.warnings.push('Rekaman live yt-dlp — cek jendela terminal. Ctrl+C untuk stop.');
+  saveJob(job);
+  await appendHistory(job);
+}
+
 /** Jalur engine: unduh + rakit di offscreen document. */
 async function startEngineDownload(job) {
-  job.ruleId = await addHeaderRule(job.url, job.headers);
+  const hosts = await discoverEngineHosts(job.url, job.kind, job.headers, job.tabId);
+  const hostRuleIds = await addHeaderRules(hosts, job.headers);
+  const catchAllId = await addCatchAllHeaderRule(job.headers);
+  job.ruleIds = [...hostRuleIds, catchAllId].filter(Boolean);
+  job.ruleId = job.ruleIds[0] ?? null;
   await ensureOffscreen();
   const delivered = await sendToOffscreen({
     target: 'offscreen',
@@ -1038,13 +1448,16 @@ async function startEngineDownload(job) {
       id: job.id,
       url: job.url,
       kind: job.kind,
+      tabId: job.tabId,
+      entryId: job.entryId,
       concurrency: settings.concurrency,
+      liveMaxMs: job.liveMaxMs,
     },
   });
   if (!delivered) {
     job.status = 'error';
     job.error = 'Mesin unduhan tidak merespons — coba muat ulang extension.';
-    await removeHeaderRule(job.ruleId);
+    await removeHeaderRule(job.ruleIds || job.ruleId);
   }
   saveJob(job);
 }
@@ -1074,7 +1487,7 @@ async function settleDownloadJob(job, state, errorCurrent) {
   } else {
     return;
   }
-  await removeHeaderRule(job.ruleId);
+  await removeHeaderRule(job.ruleIds || job.ruleId);
   clearPendingSavePath(job.blobUrl || job.url);
   if (job.blobUrl) revokeBlob(job.blobUrl);
   saveJob(job);
@@ -1107,6 +1520,16 @@ function revokeBlob(blobUrl) {
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || msg.target === 'offscreen') return;
 
+  if (msg.type === 'ksp-tab-fetch') {
+    void tabFetchViaTab(msg.tabId, msg).then(sendResponse);
+    return true;
+  }
+  if (msg.type === 'ksp-live-url') {
+    const entry = registry.get(msg.tabId)?.get(msg.entryId);
+    sendResponse({ url: freshStreamUrl(msg.tabId, entry) || entry?.url || null });
+    return true;
+  }
+
   (async () => {
     await ready;
     switch (msg.type || msg.cmd) {
@@ -1117,6 +1540,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         for (const found of msg.items || []) {
           const kind = kindFromUrl(found.url) || found.kind;
           if (!kind) continue;
+          if (isBlockedUrl(found.url) || isBlockedUrl(msg.pageUrl) || isBlockedUrl(sender.url)) continue;
           addEntry({
             url: found.url,
             kind,
@@ -1159,20 +1583,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       case 'drm-detected': {
-        const tabId = sender.tab?.id;
-        if (tabId == null) {
-          sendResponse({ ok: true });
-          return;
-        }
-        tabDrm.set(tabId, msg.keySystem || '');
-        const map = registry.get(tabId);
-        if (map) {
-          for (const e of map.values()) {
-            e.drm = true;
-            e.drmSystem = msg.keySystem || e.drmSystem;
-          }
-          schedulePersist();
-        }
         sendResponse({ ok: true });
         return;
       }
@@ -1250,7 +1660,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           job.error = String(err?.message || err);
           revokeBlob(msg.blobUrl);
         }
-        await removeHeaderRule(job.ruleId);
+        await removeHeaderRule(job.ruleIds || job.ruleId);
         saveJob(job);
         sendResponse({ ok: true });
         return;
@@ -1260,7 +1670,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (job) {
           job.status = msg.aborted ? 'canceled' : 'error';
           job.error = msg.error;
-          await removeHeaderRule(job.ruleId);
+          await removeHeaderRule(job.ruleIds || job.ruleId);
           saveJob(job);
           await appendHistory(job);
           await pumpQueue();
@@ -1272,14 +1682,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // -- dari popup ------------------------------------------------------
       case 'state': {
         const tabId = msg.tabId;
-        const list = rankEntries([...(registry.get(tabId)?.values() || [])]);
+        const blocked = isBlockedUrl(await tabPageUrl(tabId));
+        const list = blocked
+          ? []
+          : rankEntries(collapseMediaForDisplay([...(registry.get(tabId)?.values() || [])]));
         sendResponse({
           media: list,
+          blocked,
           jobs: [...jobs.values()].sort((a, b) => b.startedAt - a.startedAt).slice(0, 20),
           settings,
           history: history.slice(0, 50),
           startupErrors,
           thumb: thumbs.get(tabId) || null,
+          ytdlpReady: Boolean(await pingYtdlp()),
         });
         return;
       }
@@ -1292,12 +1707,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             return;
           }
           const headers = await headersForDownload(entry);
-          const ruleId = await addHeaderRule(entry.url, headers);
+          const hosts = await discoverEngineHosts(entry.url, 'hls', headers, msg.tabId);
+          const ruleIds = await addHeaderRules(hosts, headers);
           try {
-            const text = await fetchText(entry.url, { retries: 2 });
+            const pullText = (u) => fetchEngineText(u, msg.tabId);
+            const text = await pullText(entry.url);
             const pl = parseM3U8(text, entry.url);
             const warnings = [];
-            if (pl.live) warnings.push('Playlist live/berjalan.');
+            if (pl.live) warnings.push('Playlist live — part baru digabung otomatis saat unduh.');
             if (pl.encryption && pl.encryption !== 'AES-128') {
               warnings.push(`Enkripsi ${pl.encryption} tidak didukung.`);
             }
@@ -1307,14 +1724,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             let segments = pl.segments.length;
 
             if (pl.isMaster && pl.variants.length) {
-              // Durasi sama untuk semua kualitas, jadi cukup ukur yang tertinggi
-              // lalu skalakan sisanya menurut BANDWIDTH masing-masing.
               const sorted = sortVariants(pl.variants);
               const top = sorted[0];
-              const topPlaylist = parseM3U8(
-                await fetchText(top.url, { retries: 2 }),
-                top.url
-              );
+              const topPlaylist = parseM3U8(await pullText(top.url), top.url);
               duration = topPlaylist.duration;
               segments = topPlaylist.segments.length;
               if (topPlaylist.live) warnings.push('Playlist live/berjalan.');
@@ -1377,7 +1789,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               warnings,
             });
           } finally {
-            await removeHeaderRule(ruleId);
+            await removeHeaderRule(ruleIds);
           }
         } catch (err) {
           logDiag(msg.tabId, 'probe playlist gagal', String(err?.message || err));
@@ -1394,10 +1806,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
         const headers = await headersForDownload(entry);
-        const ruleId = await addHeaderRule(entry.url, headers);
+        const ruleIds =
+          entry.kind === 'hls' || entry.kind === 'dash'
+            ? await addHeaderRules(await discoverEngineHosts(entry.url, entry.kind, headers), headers)
+            : [await addHeaderRule(entry.url, headers)].filter(Boolean);
         try {
+          const playlist = entry.kind === 'hls' || entry.kind === 'dash';
           const res = await fetch(entry.url, {
-            headers: { Range: 'bytes=0-2047' },
+            headers: playlist ? {} : { Range: 'bytes=0-2047' },
             credentials: 'include',
             cache: 'no-store',
           });
@@ -1434,14 +1850,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           schedulePersist();
           sendResponse({ ok: true, alive, kind: entry.kind });
         } catch (err) {
-          entry.verified = false;
-          entry.verifiedAt = Date.now();
           entry.verifyError = String(err?.message || err);
+          // URL bertanda waktu (TikTok live dll) sering menolak probe — jangan blokir unduhan engine.
+          if (entry.kind !== 'hls' && entry.kind !== 'dash') entry.verified = false;
           logDiag(msg.tabId, 'verifikasi gagal', `${entry.verifyError} — ${entry.url}`);
           schedulePersist();
           sendResponse({ ok: true, alive: false, error: entry.verifyError });
         } finally {
-          await removeHeaderRule(ruleId);
+          await removeHeaderRule(ruleIds);
         }
         return;
       }
@@ -1461,7 +1877,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case 'download-all': {
         const list = rankEntries(
-          [...(registry.get(msg.tabId)?.values() || [])].filter((e) => !e.drm && e.verified !== false)
+          collapseMediaForDisplay(
+            [...(registry.get(msg.tabId)?.values() || [])].filter((e) => !e.drm && e.verified !== false)
+          )
         );
         const jobIds = [];
         for (const e of list) {
@@ -1486,7 +1904,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           if (job.downloadId != null) chrome.downloads.cancel(job.downloadId).catch(() => {});
           chrome.runtime.sendMessage({ target: 'offscreen', cmd: 'cancel', id: job.id }).catch(() => {});
           job.status = 'canceled';
-          await removeHeaderRule(job.ruleId);
+          await removeHeaderRule(job.ruleIds || job.ruleId);
           saveJob(job);
           await appendHistory(job);
           await pumpQueue();
@@ -1566,11 +1984,28 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       case 'scan': {
         try {
-          await chrome.tabs.sendMessage(msg.tabId, { cmd: 'deep-scan' });
+          await scrapeTabDom(msg.tabId);
+          await pingFrames(msg.tabId, 'deep-scan');
         } catch {
           /* frame tanpa content script */
         }
         sendResponse({ ok: true });
+        return;
+      }
+      case 'overlay-download': {
+        const tabId = sender.tab?.id ?? msg.tabId;
+        try {
+          const id = await startDownloadFromOverlay(
+            tabId,
+            msg.videoUrl,
+            msg.pageUrl || sender.tab?.url || '',
+            Boolean(msg.force),
+            msg.hint || ''
+          );
+          sendResponse({ ok: true, id });
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) });
+        }
         return;
       }
       case 'capture-thumb': {
@@ -1592,7 +2027,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await new Promise((r) => setTimeout(r, 100));
         }
         if (!thumb) thumb = thumbs.get(msg.tabId) || (await captureTabStill(msg.tabId));
-        sendResponse({ ok: true, thumb, playUrl: null });
+        sendResponse({ ok: true, playUrl: playUrl || null, thumb });
         return;
       }
       case 'settings': {
@@ -1614,7 +2049,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const tabSummaries = [];
         for (const t of browserTabs) {
           if (t.id == null || t.id < 0) continue;
-          const media = [...(registry.get(t.id)?.values() || [])].map((e) => ({
+          const blocked = isBlockedUrl(t.url);
+          const media = blocked ? [] : [...(registry.get(t.id)?.values() || [])].map((e) => ({
             id: e.id,
             kind: e.kind,
             url: e.url,
@@ -1627,6 +2063,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             tabId: t.id,
             title: t.title,
             url: t.url,
+            blocked,
             mediaCount: media.length,
             media,
             diag: d

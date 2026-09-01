@@ -14,7 +14,7 @@ export default defineConfig({
   manifest: {
     name: 'Komang-streampull (KSP)',
     description:
-      'Komang-streampull (KSP) — mendeteksi dan mengunduh stream video (HLS/m3u8, MP4 progresif) dari tab aktif, lengkap dengan spoofing Referer/Origin.',
+      'Detect and download HLS, DASH, and MP4 streams from the current tab — for media you have the right to save.',
     action: {
       default_title: 'Komang-streampull (KSP)',
       default_icon: ICONS,
@@ -30,6 +30,7 @@ export default defineConfig({
       'scripting',
       'tabs',
       'cookies',
+      'nativeMessaging',
     ],
     host_permissions: ['<all_urls>'],
     commands: {

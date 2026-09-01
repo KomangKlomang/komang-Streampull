@@ -101,7 +101,7 @@ export default async function run({ check }) {
       return;
     }
 
-    if (p === '/media.m3u8' || p === '/master.m3u8' || p === '/nopad.m3u8') {
+    if (p === '/media.m3u8' || p === '/master.m3u8' || p === '/nopad.m3u8' || p === '/live.m3u8') {
       const origin = 'http://127.0.0.1:' + server.address().port;
       const ivHex = '0x' + IV.toString('hex');
       let body;
@@ -117,6 +117,13 @@ export default async function run({ check }) {
           '/key.bin",IV=' +
           ivHex +
           '\n#EXTINF:10,\nnopad.ts\n#EXT-X-ENDLIST\n';
+      } else if (p === '/live.m3u8') {
+        body =
+          '#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXT-X-KEY:METHOD=AES-128,URI="' +
+          origin +
+          '/key.bin",IV=' +
+          ivHex +
+          '\n#EXTINF:10,\nseg0.ts\n';
       } else {
         body =
           '#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXT-X-KEY:METHOD=AES-128,URI="' +
@@ -184,6 +191,17 @@ export default async function run({ check }) {
     check(
       'segmen AES tanpa padding PKCS#7 tetap terdekripsi',
       Buffer.from(await nopad.blob.arrayBuffer()).equals(unpadded)
+    );
+
+    const live = await downloadHls({
+      url: base + '/live.m3u8',
+      concurrency: 1,
+      sinkFactory: memSink,
+    });
+    check('live tanpa ENDLIST tetap terunduh', live.blob.size > 0);
+    check(
+      'live hanya snapshot segmen saat klik',
+      live.warnings.some((w) => /live/i.test(w))
     );
 
     // ---------------------------------------------------------- probe Range ---

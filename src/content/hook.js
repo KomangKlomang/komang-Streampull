@@ -11,17 +11,64 @@
   const CHANNEL = 'GOVIDEO_PAGE';
   const MEDIA_RE = /\.(m3u8|m3u|mpd|mp4|m4v|webm|mkv|mov|flv)(?:$|[?#])/i;
   const HINT_RE = /m3u8|\.mpd|\.mp4|\/hls\/|playlist/i;
+  const STORY_HINT_RE =
+    /video_versions|image_versions2|playable_url|browser_native_|cdninstagram\.com|fbcdn\.net\/v\//;
+  const STORY_HOST_RE = /(cdninstagram\.com|fbcdn\.net|fbsbx\.com)$/i;
   const seen = new Set();
   // Dicatat supaya panel diagnostik bisa menunjukkan apa yang aktif di halaman ini.
   const installed = [];
   const mark = (name) => installed.push(name);
+
+  function isStoryMediaUrl(url) {
+    try {
+      const u = new URL(url, location.href);
+      if (!STORY_HOST_RE.test(u.hostname)) return false;
+      const path = u.pathname;
+      return (
+        /\.(jpe?g|png|webp|gif|mp4|m4v|mov|webm)(?:$)/i.test(path) || /\/(?:v|o1)\/t\d+/i.test(path)
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  function harvestStoryMedia(node) {
+    const out = [];
+    const known = new Set();
+    let steps = 0;
+    function add(url) {
+      if (!isStoryMediaUrl(url) || known.has(url)) return;
+      known.add(url);
+      out.push(url);
+    }
+    function walk(x, depth) {
+      if (out.length >= 30 || steps++ > 8000 || x == null || depth > 14) return;
+      if (typeof x === 'string') {
+        add(x);
+        return;
+      }
+      if (Array.isArray(x)) {
+        if (x.length && x[0] && typeof x[0] === 'object' && (x[0].url || x[0].src) && typeof x[0].width === 'number') {
+          const top = [...x].sort((a, b) => (b.width || 0) - (a.width || 0))[0];
+          add(top.url || top.src);
+          return;
+        }
+        for (const item of x) walk(item, depth + 1);
+        return;
+      }
+      if (typeof x !== 'object') return;
+      for (const v of Object.values(x)) walk(v, depth + 1);
+    }
+    walk(node, 0);
+    return out;
+  }
 
   function report(url, source) {
     try {
       if (!url || typeof url !== 'string') return;
       if (url.startsWith('blob:') || url.startsWith('data:')) return;
       const abs = new URL(url, location.href).href;
-      if (!MEDIA_RE.test(abs)) return;
+      if (!MEDIA_RE.test(abs) && !isStoryMediaUrl(abs)) return;
       if (seen.has(abs)) return;
       seen.add(abs);
       window.postMessage({ channel: CHANNEL, url: abs, source }, '*');
@@ -99,16 +146,49 @@
   }
 
   // ---------------------------------------------------------------- fetch ---
+  function harvestApiResponse(text, url, source) {
+    try {
+      if (!text || text.length > 3_000_000) return;
+      if (!STORY_HINT_RE.test(text) && !/video_versions|image_versions2|graphql/i.test(String(url))) return;
+      const json = JSON.parse(text);
+      for (const u of harvestStoryMedia(json)) report(u, source);
+    } catch {
+      /* bukan JSON */
+    }
+  }
+
   try {
     const nativeFetch = window.fetch;
     if (typeof nativeFetch === 'function') {
-      const patched = function fetch(input) {
+      const patched = function fetch(input, init) {
         try {
           report(typeof input === 'string' ? input : input?.url, 'fetch');
         } catch {
           /* abaikan */
         }
-        return nativeFetch.apply(this, arguments);
+        const resPromise = nativeFetch.apply(this, arguments);
+        try {
+          const reqUrl = typeof input === 'string' ? input : input?.url || '';
+          if (/graphql|\/api\/v1\//i.test(reqUrl)) {
+            resPromise
+              .then((res) => {
+                try {
+                  res
+                    .clone()
+                    .text()
+                    .then((text) => harvestApiResponse(text, reqUrl, 'ig-api'))
+                    .catch(() => {});
+                } catch {
+                  /* abaikan */
+                }
+                return res;
+              })
+              .catch(() => {});
+          }
+        } catch {
+          /* abaikan */
+        }
+        return resPromise;
       };
       keepNativeToString(patched, nativeFetch);
       window.fetch = patched;
@@ -123,6 +203,7 @@
     const nativeOpen = XMLHttpRequest.prototype.open;
     const patchedOpen = function open(method, url) {
       try {
+        this.__sgUrl = url;
         report(url, 'xhr');
       } catch {
         /* abaikan */
@@ -131,6 +212,25 @@
     };
     keepNativeToString(patchedOpen, nativeOpen);
     XMLHttpRequest.prototype.open = patchedOpen;
+
+    const nativeSend = XMLHttpRequest.prototype.send;
+    const patchedSend = function send() {
+      try {
+        this.addEventListener('load', function onLoad() {
+          try {
+            if (this.responseType && this.responseType !== '' && this.responseType !== 'text') return;
+            harvestApiResponse(this.responseText, this.__sgUrl, 'ig-api');
+          } catch {
+            /* abaikan */
+          }
+        });
+      } catch {
+        /* abaikan */
+      }
+      return nativeSend.apply(this, arguments);
+    };
+    keepNativeToString(patchedSend, nativeSend);
+    XMLHttpRequest.prototype.send = patchedSend;
     mark('xhr');
   } catch {
     /* abaikan */
@@ -167,14 +267,18 @@
   try {
     const nativeParse = JSON.parse;
     const patched = function parse(text) {
+      const out = nativeParse.apply(this, arguments);
       try {
+        if (typeof text === 'string' && text.length < 2e6 && STORY_HINT_RE.test(text)) {
+          for (const url of harvestStoryMedia(out)) report(url, 'story');
+        }
         if (typeof text === 'string' && text.length < 500000 && HINT_RE.test(text)) {
           reportAll(text, 'json');
         }
       } catch {
         /* abaikan */
       }
-      return nativeParse.apply(this, arguments);
+      return out;
     };
     keepNativeToString(patched, nativeParse);
     JSON.parse = patched;
@@ -405,10 +509,29 @@
           el.getAttribute('src') ||
             el.getAttribute('data-src') ||
             el.getAttribute('data-file') ||
+            el.getAttribute('data-url') ||
             el.getAttribute('data-fallback'),
           playing ? 'playing' : 'dom'
         );
         if (el.currentSrc) report(el.currentSrc, playing ? 'playing' : 'dom');
+      }
+      for (const a of document.querySelectorAll('a[href]')) {
+        const href = a.getAttribute('href') || '';
+        const base = href.split('?')[0].toLowerCase();
+        if (/\.(m3u8|m3u|mpd|mp4|m4v|webm|mkv|mov|flv|ogv|ogg)$/.test(base)) report(a.href, 'dom-link');
+      }
+      try {
+        const host = location.hostname;
+        if (/(^|\.)(instagram\.com|facebook\.com|fb\.com|messenger\.com|whatsapp\.com)$/i.test(host)) {
+          for (const img of document.querySelectorAll('img')) {
+            const w = img.naturalWidth || img.width || 0;
+            const h = img.naturalHeight || img.height || 0;
+            if (w < 160 || h < 90) continue;
+            report(img.currentSrc || img.src, 'story');
+          }
+        }
+      } catch {
+        /* abaikan */
       }
       for (const script of document.querySelectorAll('script')) {
         scanText(script.textContent || '', 'inline-script');
@@ -455,17 +578,23 @@
     }
   }
 
-  function captureThumb() {
-    let best = null;
+  function pickPreviewVideo() {
+    const list = [];
     try {
       for (const v of document.querySelectorAll('video')) {
-        if (v.videoWidth > 0 && v.videoHeight > 0) {
-          if (!best || v.videoWidth > best.videoWidth) best = v;
-        }
+        if (v.videoWidth > 0 && v.videoHeight > 0) list.push(v);
       }
     } catch {
-      /* abaikan */
+      return null;
     }
+    const playing = list.find((v) => !v.paused && !v.ended);
+    if (playing) return playing;
+    list.sort((a, b) => b.videoWidth * b.videoHeight - a.videoWidth * a.videoHeight);
+    return list[0] || null;
+  }
+
+  function captureThumb() {
+    const best = pickPreviewVideo();
 
     if (best) {
       if (grabFrame(best)) return;
@@ -491,7 +620,7 @@
       };
       v.addEventListener('seeked', finish, { once: true });
       v.addEventListener('loadeddata', finish, { once: true });
-      if (Number.isFinite(v.duration) && v.duration > 0 && v.currentTime === 0) {
+      if (Number.isFinite(v.duration) && v.duration > 0 && v.duration !== Infinity && v.currentTime === 0) {
         v.currentTime = Math.min(0.2, v.duration / 20);
       }
     } catch {

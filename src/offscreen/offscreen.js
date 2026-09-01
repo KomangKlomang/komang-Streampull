@@ -2,9 +2,32 @@
 // Service worker boleh mati; dokumen ini tetap hidup sampai job selesai.
 
 import { downloadDash, downloadFile, downloadHls } from '../lib/downloader.js';
+import { createTabFetch } from '../lib/tab-fetch-bridge.js';
+import { fetchBytes, fetchText } from '../lib/net.js';
 import { sweepOpfs } from '../lib/sink.js';
 import { createPauseGate } from '../lib/util.js';
 
+/** Tab fetch dulu; kalau tab ditutup, lanjut lewat extension + header DNR. */
+function hybridFetch(tabId) {
+  const tab = tabId != null && tabId >= 0 ? createTabFetch(tabId) : null;
+  if (!tab) return { fetchText, fetchBytes };
+  return {
+    fetchText: async (url, opts) => {
+      try {
+        return await tab.fetchText(url, opts);
+      } catch {
+        return fetchText(url, opts);
+      }
+    },
+    fetchBytes: async (url, opts) => {
+      try {
+        return await tab.fetchBytes(url, opts);
+      } catch {
+        return fetchBytes(url, opts);
+      }
+    },
+  };
+}
 void sweepOpfs().then((n) => {
   if (n) console.info('[KSP] membersihkan', n, 'berkas sementara');
 });
@@ -59,12 +82,27 @@ async function run(job) {
 
   try {
     const runner = job.kind === 'hls' ? downloadHls : job.kind === 'dash' ? downloadDash : downloadFile;
+    const fetchers = job.kind === 'hls' ? hybridFetch(job.tabId) : {};
+    const refreshUrl =
+      job.tabId != null && job.entryId
+        ? async () => {
+            const r = await chrome.runtime.sendMessage({
+              type: 'ksp-live-url',
+              tabId: job.tabId,
+              entryId: job.entryId,
+            });
+            return r?.url || null;
+          }
+        : undefined;
     const { blob, ext, warnings, cleanup } = await runner({
       url: job.url,
       concurrency: job.concurrency,
       signal: ctrl.signal,
       onProgress,
       pauseGate: pause,
+      liveMaxMs: job.liveMaxMs,
+      refreshUrl,
+      ...fetchers,
     });
 
     const blobUrl = URL.createObjectURL(blob);

@@ -1,7 +1,7 @@
 // Parser DASH MPD — VOD statis: SegmentTemplate (Number/Time) dan SegmentList.
 // Live (type=dynamic) dan DRM (ContentProtection) ditandai, tidak diunduh.
 
-import { absUrl } from './util.js';
+import { absUrl, hostOf } from './util.js';
 
 export function isoDuration(raw) {
   const s = String(raw || '').trim();
@@ -199,6 +199,20 @@ export function parseMpd(text, baseUrl) {
     multiPeriod: periods.length > 1,
     representations,
   };
+}
+
+/** Semua host segmen/init dari MPD. */
+export function collectDashHosts(mpd) {
+  const hosts = new Set();
+  const add = (url) => {
+    const h = hostOf(url);
+    if (h) hosts.add(h);
+  };
+  for (const r of mpd?.representations || []) {
+    if (r.init?.url) add(r.init.url);
+    for (const s of r.segments || []) add(s.url);
+  }
+  return hosts;
 }
 
 export function dashLabel(rep) {

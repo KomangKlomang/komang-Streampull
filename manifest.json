@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Komang-streampull (KSP)",
   "version": "2.0.0",
-  "description": "Komang-streampull (KSP) — mendeteksi dan mengunduh stream video (HLS/m3u8, MP4 progresif) dari tab aktif, lengkap dengan spoofing Referer/Origin.",
+  "description": "Detect and download HLS, DASH, and MP4 streams from the current tab — for media you have the right to save.",
   "minimum_chrome_version": "116",
 
   "permissions": [
@@ -14,7 +14,8 @@
     "offscreen",
     "scripting",
     "tabs",
-    "cookies"
+    "cookies",
+    "nativeMessaging"
   ],
 
   "host_permissions": ["<all_urls>"],

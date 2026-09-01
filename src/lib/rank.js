@@ -1,5 +1,7 @@
 // Skor intent stream (PRD §5.1). Dipakai saat merender daftar, bukan saat deteksi.
 
+import { analyzeHlsUrl, isJunkHls } from './hls-score.js';
+
 const AD_RE = /doubleclick|googlesyndication|adsystem|adnxs|adservice|pagead|advert/i;
 const CDN_RE = /akamai|cloudfront|fastly|\.cdn\.|cdn\d*\./i;
 const HOOK_SRC = /^(hls\.js|jwplayer|videojs|dplayer|clappr|plyr|fluidplayer|player)$/i;
@@ -76,4 +78,21 @@ export function rankEntries(entries) {
     return (b.lastSeen || 0) - (a.lastSeen || 0);
   });
   return list;
+}
+
+/** Stream yang diputar / skor tertinggi — untuk preview & tombol overlay, bukan urutan daftar. */
+export function pickPrimaryEntry(entries, opts = {}) {
+  const list = rankEntries(entries).filter(
+    (e) => (opts.allowDrm || !e.drm) && e.verified !== false && (e.kind !== 'hls' || !isJunkHls(e))
+  );
+  const playing = list.find((e) => e.playing);
+  if (playing) return playing;
+  // Live (TikTok dll) sering punya mp4 mati + m3u8 hidup — jangan pilih FILE dulu.
+  const hls = list
+    .filter((e) => e.kind === 'hls')
+    .sort((a, b) => (b.hlsScore ?? analyzeHlsUrl(b.url).score) - (a.hlsScore ?? analyzeHlsUrl(a.url).score));
+  if (hls[0]) return hls[0];
+  const dash = list.find((e) => e.kind === 'dash');
+  if (dash) return dash;
+  return list[0] || null;
 }

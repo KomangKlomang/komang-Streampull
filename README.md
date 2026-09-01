@@ -1,311 +1,143 @@
 # Komang-streampull (KSP)
 
-Extension Chromium (Manifest V3) untuk **mendeteksi dan mengunduh stream video** dari tab
-yang sedang dibuka — termasuk situs hosting yang memakai player ter-obfuscate,
-playlist HLS, dan proteksi hotlink berbasis `Referer`.
+[![tests](https://github.com/KomangKlomang/govideo/actions/workflows/tests.yml/badge.svg)](https://github.com/KomangKlomang/govideo/actions/workflows/tests.yml)
 
-Dibuat khusus untuk kasus seperti `https://streamrizz.com/d/<id>`, tapi bekerja generik
-di situs mana pun yang menyajikan `.m3u8` atau file video progresif.
+Chromium extension (Manifest V3) that **detects and downloads media streams from the current tab** — HLS (`.m3u8`), DASH (`.mpd`), and progressive MP4 — for content you have the right to save.
 
----
-
-## Cara kerjanya
-
-Alih-alih membongkar enkripsi/obfuscation JavaScript situs (yang berubah tiap minggu),
-Komang-streampull (KSP) **membiarkan player situs itu sendiri yang membuka URL aslinya**, lalu menangkapnya
-dari tiga arah sekaligus:
-
-| Lapisan | Berkas | Yang ditangkap |
-|---|---|---|
-| Sniffer jaringan | `src/background.js` | Semua request `.m3u8`/`.mpd`/`.mp4` beserta header aslinya (`Referer`, `Origin`, `Cookie`, `User-Agent`) lewat `chrome.webRequest` |
-| Hook halaman (MAIN world) | `src/content/hook.js` | Patch `fetch`, `XMLHttpRequest.open`, setter `video.src`, `Element.setAttribute` |
-| Hook player | `src/content/hook.js` | `Hls.prototype.loadSource` (hls.js), `jwplayer`, `videojs`, `DPlayer`, `Clappr`, `Plyr`, `fluidPlayer` |
-| Hook deobfuscation | `src/content/hook.js` | `atob()` dan `JSON.parse()` — apa pun yang dibuka script saat runtime ikut terbaca |
-| Pemindai statis | `src/content/hook.js` | P.A.C.K.E.R., escape `\xNN`/`\uNNNN`, literal base64, penggabungan string, dan blok JSON tertanam (`__NEXT_DATA__`, `application/json`) |
-
-### Panel diagnostik
-
-Tombol **Diagnostik** di bagian bawah panel menunjukkan apa yang sebenarnya dilihat
-engine di tab ini, supaya "tidak jalan" bisa dipersempit jadi penyebab yang konkret:
-
-- berapa frame yang berhasil dipasangi content script, beserta URL-nya
-- hook mana saja yang benar-benar aktif di konteks halaman (`fetch`, `atob`,
-  `JSON.parse`, `hls.js`, dan seterusnya)
-- berapa respons jaringan terpantau versus berapa yang tercatat sebagai media
-- daftar respons yang **dilewati beserta alasannya** — tipe tidak dikenali, dianggap
-  potongan segmen, di bawah ukuran minimum, verifikasi ditolak server
-
-Di atasnya ada satu kalimat kesimpulan yang menunjuk lapisan tempat rantainya putus:
-content script tidak jalan, hook gagal terpasang, webRequest bisu, lalu lintas ada tapi
-tak berbentuk media, atau server menolak permintaan kita. Penyebab paling dasar selalu
-diprioritaskan, bukan gejala hilirnya.
-
-### Situs dengan URL yang disembunyikan
-
-Situs streaming modern jarang menaruh URL video apa adanya. Pola yang lazim: URL
-disimpan base64, dipecah jadi escape heksadesimal, dirangkai dari potongan string,
-atau ditaruh di JSON server-rendered — lalu diserahkan ke `hls.js`.
-
-Komang-streampull (KSP) tidak memakai aturan khusus per situs (extractor hardcoded patah begitu
-situsnya ganti bundler). Pendekatannya: **cegat di titik yang tidak bisa dihindari
-situs mana pun**. Seobfuscated apa pun kodenya, pada akhirnya URL asli harus melewati
-`atob`, `JSON.parse`, `fetch`, atau `loadSource` — dan semuanya sudah dipasangi hook.
-Sniffer jaringan menjadi jaring terakhir: begitu videonya diputar, URL-nya terlihat.
-
-Karena pemindaian ini agresif, sebagian kandidat bisa saja bukan video hidup.
-Setiap URL hasil pemindaian halaman **diverifikasi otomatis** (ambil 2 KB pertama,
-periksa apakah benar `#EXTM3U`/MPD/kontainer video). Yang lolos ditandai
-*terverifikasi* dan naik ke atas daftar; yang gagal ditandai *tidak merespons*.
-
-Content script berjalan di **semua frame** (`all_frames: true`), jadi video yang dipasang lewat
-`<iframe>` embed lintas-domain tetap terbaca.
-
-### Melewati proteksi hotlink
-
-CDN situs-situs ini biasanya menolak request yang `Referer`-nya bukan halaman aslinya.
-Fetch dari extension tidak boleh menyetel `Referer` (header terlarang di `fetch()`), jadi
-Komang-streampull (KSP) memasang aturan **`declarativeNetRequest` sesi** yang menulis ulang
-`Referer` / `Origin` / `Cookie` khusus untuk request yang berasal dari extension
-(`tabIds: [-1]`, jadi trafik tab biasa tidak tersentuh). Aturan itu dicabut lagi
-begitu job selesai.
-
-Nilai header yang dipakai bukan tebakan — persis yang tadi dikirim halaman saat memutar video.
-
-### Pratinjau video
-
-Panel menampilkan **frame asli** dari video sebelum kamu mengunduhnya. Frame diambil
-dengan menggambar elemen `<video>` yang sedang termuat ke `<canvas>`, jadi yang terlihat
-benar-benar isi videonya — bukan tebakan. Kalau kanvasnya ter-*taint* (sumber lintas-domain
-tanpa CORS), otomatis jatuh ke `poster` / `og:image` halaman. Resolusi dan durasi ikut
-ditampilkan. Tombol **Ambil frame** menangkap ulang kapan saja.
-
-### Ukuran video untuk stream HLS
-
-Situs yang menyajikan MP4 biasa memberi tahu ukurannya lewat header `Content-Length`.
-HLS tidak: playlist `.m3u8` hanya berisi daftar segmen, tanpa satu pun angka ukuran.
-Itu sebabnya stream HLS dulu tampil tanpa ukuran sementara situs lain menampilkannya.
-
-Sekarang ukurannya diukur sendiri, otomatis begitu panel dibuka:
-
-1. Ambil tiga segmen contoh di posisi 25%, 50%, dan 75% playlist — sengaja menghindari
-   segmen pertama dan terakhir yang biasanya lebih pendek.
-2. Ukurannya didapat lewat permintaan **satu byte**: header `Content-Range` membocorkan
-   ukuran penuh tanpa perlu mengunduh segmennya.
-3. Hitung laju byte per detik dari sampel (bukan rata-rata per segmen, karena durasi
-   segmen sering tidak seragam), lalu kalikan durasi total playlist.
-4. Untuk master playlist, kualitas tertinggi diukur langsung, sisanya diskalakan menurut
-   `BANDWIDTH` masing-masing — dikalibrasi dengan hasil pengukuran tadi, karena
-   `BANDWIDTH` yang ditulis encoder kerap dilebihkan.
-
-Hasilnya meleset sekitar 4% dari ukuran sebenarnya, dengan tiga permintaan 1 byte.
-Angka estimasi ditandai `~`. Kalau semua segmen memakai `#EXT-X-BYTERANGE`, ukurannya
-dihitung persis tanpa permintaan jaringan sama sekali.
-
-Durasi dan resolusi ikut tampil, dan progres unduhan HLS memakai estimasi ini sebagai
-pembanding byte.
-
-### Kecepatan: multi-koneksi ala IDM
-
-Unduhan file progresif memakai **banyak permintaan HTTP `Range` paralel** atas satu file.
-Ini inti trik IDM/XDM: server video hampir selalu membatasi laju *per koneksi*, jadi
-delapan koneksi mendekati delapan kali laju satu koneksi sampai batas jaringan tercapai.
-
-Dua hal yang membuatnya lebih baik daripada sekadar membagi rata di awal:
-
-- **Dynamic segmentation** — begitu satu koneksi selesai, ia mencuri separuh sisa
-  pekerjaan koneksi yang paling tertinggal. Tanpa ini, satu koneksi lambat menahan
-  seluruh unduhan di ekornya. (Ini persis fitur yang bikin IDM terasa cepat.)
-- **Koneksi adaptif** — jumlah koneksi dinaikkan bertahap selama throughput masih ikut
-  naik, lalu berhenti di titik jenuh. Membuka 16 koneksi sekaligus justru memancing
-  `429 Too Many Requests` dan berakhir lebih lambat.
-
-Untuk HLS, segmen sudah paralel sejak awal; yang ditambahkan adalah ramp adaptif yang sama
-plus laporan kecepatan/ETA/jumlah koneksi.
-
-**Adakah yang lebih cepat dari IDM/XDM?** Jujur: tidak ada trik ajaib. Batas sesungguhnya
-adalah throttle server dan bandwidth kamu — semua akselerator (IDM, XDM, aria2) menang dari
-hal yang sama, yaitu paralelisme. Yang bisa ditambahkan di atas itu: retry per-rentang yang
-melanjutkan dari posisi terakhir (bukan mengulang dari nol), dan menulis langsung ke disk
-sehingga file besar tidak tercekik RAM. Keduanya sudah ada di sini. HTTP/3 ditangani Chrome
-sendiri kalau server mendukungnya.
-
-### Perakitan berkas
-
-Unduhan berjalan di **offscreen document**, bukan di service worker, supaya tidak ikut mati
-saat Chrome men-suspend worker di tengah unduhan.
-
-- **HLS TS** → segmen digabung berurutan jadi satu `.ts` (bisa langsung diputar di VLC/mpv/MPC).
-- **HLS fMP4** (`#EXT-X-MAP`) → init segment + fragmen digabung jadi `.mp4` yang valid.
-- **AES-128** (`#EXT-X-KEY`) → kunci diambil, IV diturunkan dari atribut `IV` atau nomor urut
-  media sequence, lalu didekripsi dengan WebCrypto. Ada jalur cadangan untuk segmen tanpa
-  padding PKCS#7.
-- **`#EXT-X-BYTERANGE`** → diambil dengan header `Range`.
-- **MP4 progresif** → multi-koneksi Range, ditulis acak sesuai offset masing-masing.
-
-Hasil ditulis ke **OPFS** (Origin Private File System) — file di disk, bukan di RAM. Itu yang
-memungkinkan tulis acak dari banyak koneksi sekaligus sekaligus menghapus plafon `Blob`
-~2 GB. Bila OPFS tidak tersedia, mesin jatuh ke penampung memori yang memindahkan tiap
-~48 MB ke `Blob`. File sementara dihapus otomatis setelah unduhan tersimpan.
+[Bahasa Indonesia → README.id.md](README.id.md)
 
 ---
 
-## Pasang
+## Authorized use
 
-1. Buka `chrome://extensions` (Chrome, Edge, Brave, Opera — semua Chromium ≥ 116).
-2. Nyalakan **Developer mode**.
-3. **Hapus** extension lama (GoVideo/StreamGrab/KSP) kalau masih ada — lalu **Load unpacked**.
-4. Pilih folder **`D:\streamgrab\v3-setelah-prd`** (yang ada `manifest.json`-nya, **bukan** `.output`).
+KSP is a learning project. The authors do not distribute copyrighted media, do not monetize this extension, and are not responsible for how you use it. Use it only for study and only on streams you have the right to save.
 
-Tidak perlu `npm run build` untuk dipakai. Build WXT hanya untuk zip/distribusi.
+Use KSP only on streams you own, have a license to download, or that the site operator has made freely available. Circumventing DRM, paywalls, or access controls is not supported and will not be added.
 
-5. **Pin ikonnya** — puzzle 🧩 → **Komang-streampull** → pin 📌.
-6. **Refresh tab video** yang sudah terbuka (F5) supaya content script ikut reload.
+A **store blocklist** disables detection and download on major commercial platforms (YouTube, Netflix, Disney+, and similar). Site operators can request more domains via an **[opt-out issue](https://github.com/KomangKlomang/govideo/issues/new?template=opt-out-request.yml)**.
 
-### Zip / build (opsional)
+---
+
+## Install (unpacked)
+
+1. Open `chrome://extensions` (Chrome, Edge, Brave, Opera — Chromium 116+).
+2. Turn on **Developer mode**.
+3. Click **Load unpacked**.
+4. Select **this repository folder** — the one that contains `manifest.json` (not `.output`).
+
+You do not need `npm run build` to try it. A WXT zip is only for packaging.
+
+5. **Pin the icon** — puzzle menu → Komang-streampull → pin.
+6. **Refresh** any already-open video tab (F5) so content scripts reload.
+
+Chrome has blocked `--load-extension` from the command line since version 137. Use **Load unpacked**.
+
+### Optional zip build
 
 ```bash
 npm install
 npm run pack
 ```
 
-Hasil: `.output/komang-streampull-2.0.0-chrome.zip` atau load `.output\chrome-mv3`.
-
-### Ikonnya tidak muncul di toolbar
-
-Ini normal, bukan kerusakan: **extension unpacked tidak pernah otomatis di-pin.**
-Chrome menaruhnya di menu Extensions, bukan langsung di toolbar.
-
-1. Klik ikon **puzzle 🧩** di kanan address bar.
-2. Cari **Komang-streampull (KSP)** di daftar.
-3. Klik ikon **pin 📌** di sebelahnya — barulah ikonnya nangkring di toolbar.
-
-Kalau Komang-streampull (KSP) **tidak ada** di daftar puzzle itu:
-
-- Pastikan folder yang dipilih adalah **`D:\streamgrab\v3-setelah-prd`** (root, ada `manifest.json` + folder `src/`).
-- Lihat kartu Komang-streampull (KSP) di `chrome://extensions` — kalau ada tombol **Errors**
-  (kuning/merah), klik dan baca isinya.
-- Tombol **service worker** di kartu itu membuka DevTools background; tab Console
-  di situ menampilkan error runtime.
-- Popup juga menampilkan spanduk merah sendiri kalau service worker gagal start
-  atau ada API yang tidak tersedia di browser tersebut.
-
-> Catatan: memuat extension lewat flag `--load-extension` dari command line **sudah
-> diblokir Chrome sejak versi 137**. Satu-satunya jalur yang bekerja adalah tombol
-> **Load unpacked** di `chrome://extensions`.
+Load the unpacked output under `.output/chrome-mv3`, or install the zip Chrome produces.
 
 ---
 
-## Pakai
+## Usage
 
-1. Buka halaman videonya, misal `https://streamrizz.com/d/zxsuoute1j1q`.
-2. Klik ikon Komang-streampull (KSP). Kalau daftarnya masih kosong:
-   - tekan **Putar** — extension memaksa `<video>`/tombol play supaya player memuat stream, atau
-   - tekan **Pindai** — memindai ulang script halaman, atau
-   - mainkan videonya sendiri 2–3 detik lalu buka lagi panelnya.
-3. Entri **HLS** / **DASH** / **FILE** akan muncul. Tekan **Kualitas** untuk daftar resolusi,
-   atau **Unduh terbaik** untuk kualitas teratas.
-4. Berkas tersimpan di `Downloads/KSP/<judul halaman>.<ext>` (folder bisa diubah di Pengaturan).
+1. Open a page that plays a stream you are allowed to save.
+2. Click the KSP icon. If the list is empty: press **Play** in the popup, press **Scan**, or start playback on the page for a few seconds and reopen the popup.
+3. Choose quality, or download the listed stream. Files go to `Downloads/KSP/` (changeable in Settings).
 
-Angka **Paralel** di bawah mengatur berapa segmen diunduh bersamaan (default 6).
-Turunkan ke 2–3 kalau server mulai membalas 403/429.
+A public HLS fixture you can use without a commercial site is documented in [docs/DEMO.md](docs/DEMO.md).
 
-### Ubah `.ts` jadi `.mp4`
+### Convert `.ts` to `.mp4`
 
-Hasil HLS-TS diputar normal di VLC. Kalau butuh `.mp4` (remux, tanpa encode ulang):
+HLS Transport Stream files play in VLC as-is. If you need an `.mp4` container (remux, no re-encode):
 
 ```bash
 ffmpeg -i "input.ts" -c copy -bsf:a aac_adtstoasc "output.mp4"
 ```
 
----
-
-## Kalau mentok
-
-Tombol **Detail** di tiap entri menampilkan URL asli, `Referer` yang terdeteksi, dan
-**perintah `ffmpeg` siap tempel** dengan header yang benar. Itu jalur cadangan untuk kasus
-yang tidak ditangani extension:
-
-| Situasi | Solusi |
-|---|---|
-| Audio ada di track terpisah (`#EXT-X-MEDIA:TYPE=AUDIO` punya URI sendiri) | Pakai perintah ffmpeg — penggabungan track butuh muxer sungguhan. Extension akan memberi peringatan bila ini terdeteksi. |
-| Berkas sangat besar | Sudah ditangani lewat OPFS (tulis ke disk). Kalau OPFS tidak tersedia dan file > ~2 GB, pakai perintah ffmpeg. |
-| Stream live tanpa `#EXT-X-ENDLIST` | Extension hanya mengambil segmen yang tercantum saat itu. Untuk merekam terus, pakai ffmpeg. |
-| DASH live / DRM | Live DASH dan MPD terlindungi ditolak. VOD DASH tanpa DRM diunduh lewat engine. |
-| Widevine / SAMPLE-AES | **Tidak didukung dan tidak akan ditambahkan.** |
-| Situs yang stream-nya tetap tidak muncul | Pakai perintah ffmpeg bila kamu sudah punya URL-nya. Penyadapan `SourceBuffer.appendBuffer` dan perekaman ulang layar **sengaja tidak disertakan** — keduanya khusus untuk melumpuhkan mekanisme anti-unduh, bukan kemampuan umum. |
-| Unduhan langsung MP4 kena 403 | Tekan **Unduh via engine** — jalur ini memakai fetch bersama aturan header. |
+**ffmpeg.wasm is not bundled.** In-browser remux would remove the CLI step, but it is a large download and a later product decision — fMP4 / CMAF streams already save as `.mp4`.
 
 ---
 
-## Menjalankan tes
+## How it works (short)
+
+KSP does not ship per-site extractors. It watches the same places a player must use: network responses, `fetch` / `XHR`, `video.src`, and common player APIs (hls.js, Video.js, JW Player, and similar). Playlists and files are verified before they are treated as media.
+
+Extension-initiated fetches reuse request headers the page already sent, scoped to the extension (`tabIds: [-1]`), so ordinary tab traffic is unchanged.
+
+### Diagnostics
+
+The **Diagnostics** control in the popup shows which frames received the content script, which hooks ran, how many network responses were seen versus recorded as media, and why candidates were skipped.
+
+---
+
+## Tests and CI
 
 ```bash
-node tests/run.mjs
+npm test
 ```
 
-Tanpa dependensi. Tambahkan nama suite untuk menjalankan sebagiannya saja:
-`node tests/run.mjs sink`.
+No extra dependencies. GitHub Actions runs the same command on every push and pull request.
 
-Suite `sink` memakai tiruan OPFS di `tests/helpers/fake-opfs.mjs`. Ini penting:
-Node tidak punya OPFS, jadi tanpa tiruan itu `OpfsSink` tidak pernah teruji sama
-sekali — dan di jalur itulah bug tersimpannya video sebagai `.txt` bersembunyi
-(File hasil OPFS tidak membawa tipe MIME, lalu Chrome menebaknya sendiri).
-
-## Struktur berkas
-
-```
-manifest.json
-icons/                     ikon 16/32/48/128
-src/
-  background.js            service worker: deteksi, aturan DNR, koordinasi job
-  content/
-    hook.js                MAIN world: patch player, unpacker, deep scan
-    detector.js            isolated world: jembatan ke service worker
-  offscreen/
-    offscreen.html/.js     mesin unduhan berumur panjang
-  lib/
-    m3u8.js                parser HLS (master, media, KEY, MAP, BYTERANGE)
-    accel.js               multi-koneksi Range + dynamic segmentation
-    speed.js               pengukur throughput + pengendali koneksi adaptif
-    sink.js                penampung hasil: OPFS (disk) / memori
-    downloader.js          engine HLS + file, AES-128
-    net.js                 fetch + retry/backoff
-    util.js                helper bersama
-  popup/
-    popup.html/.css/.js    antarmuka
+```bash
+node tests/run.mjs sink
 ```
 
-## Izin yang diminta, dan alasannya
-
-| Izin | Alasan |
-|---|---|
-| `webRequest` + `<all_urls>` | Melihat URL media dan header asli yang dipakai halaman |
-| `declarativeNetRequest` | Menulis ulang `Referer`/`Origin`/`Cookie` untuk request extension sendiri |
-| `downloads` | Menyimpan hasil |
-| `offscreen` | Menjalankan unduhan di luar service worker |
-| `storage` | Menyimpan daftar deteksi per tab + preferensi |
-| `tabs` | Judul halaman untuk nama berkas, dan memetakan deteksi ke tab |
-| `cookies` | Mempertahankan sesi saat mengambil segmen |
-
-Tidak ada data yang dikirim ke mana pun; semuanya lokal di browser.
+runs a single suite. The `sink` suite uses a fake OPFS helper because Node has no Origin Private File System.
 
 ---
 
-Pastikan kamu memang berhak mengunduh materi yang bersangkutan.
+## Permissions
 
-## Dev preview (tanpa reload extension)
+| Permission | Why |
+|---|---|
+| `webRequest` + `<all_urls>` | See media URLs and the headers the page used |
+| `declarativeNetRequest` | Apply those headers to extension-only download requests |
+| `downloads` | Save the file |
+| `offscreen` | Keep the download engine alive outside the service worker |
+| `storage` | Per-tab detections and settings |
+| `tabs` | Page title for filenames; map detections to a tab |
+| `cookies` | Keep the site session when fetching segments |
+
+Nothing is sent to a KSP server. Work stays in the browser.
+
+---
+
+## Limits
+
+| Situation | What happens |
+|---|---|
+| Separate audio playlist (`#EXT-X-MEDIA:TYPE=AUDIO`) | Warning; use ffmpeg to mux |
+| Live HLS without `#EXT-X-ENDLIST` | Only segments listed at that moment |
+| Widevine / SAMPLE-AES / DRM | Download still offered, with a confirm dialog; the file may not play |
+| Blocklisted site | Empty media list and a popup notice |
+| Very large files | Written via OPFS (disk), not a giant in-memory Blob |
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 KomangKlomang
+
+## Dev preview (no extension reload)
 
 ```bash
 npm run dev:preview
 ```
 
-Buka `http://localhost:5173/dev/` — popup live, studio, dan mockup Option B Modern Card di `dev/ksp-preview/`.
+Then open `http://localhost:5173/dev/` for the live popup mock.
 
-## GitHub
+## Layout
 
-Repo target: **komang-streampull** (branch `dev`). Rename di GitHub Settings → General → Repository name, lalu:
-
-```bash
-git remote set-url origin https://github.com/KomangKlomang/komang-streampull.git
 ```
-
+manifest.json
+src/background.js          service worker
+src/content/               page hooks + isolated bridge
+src/lib/                   playlist parsers, downloader, blocklist
+src/popup/                 toolbar UI
+tests/                     node tests/run.mjs
+```

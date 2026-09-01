@@ -108,6 +108,7 @@ function mockDashboard() {
         url: 'https://example.com/watch?v=demo',
         mediaCount: store.media.length,
         media: store.media.map((m) => ({ ...m })),
+        blocked: false,
         diag: mockDiag(),
       },
     ],
@@ -125,6 +126,7 @@ function handleMessage(msg) {
         history: store.history.map((h) => ({ ...h })),
         startupErrors: store.startupErrors,
         thumb: store.thumb,
+        blocked: false,
       };
     case 'diagnostics':
       return mockDiag();
@@ -133,15 +135,15 @@ function handleMessage(msg) {
     case 'settings':
       Object.assign(store.settings, msg.patch || {});
       return { ok: true, settings: store.settings };
-    case 'download':
+    case 'overlay-download':
       store.jobs.unshift({
         id: 'job_' + Date.now(),
-        nameBase: 'Unduhan baru',
+        nameBase: 'Unduhan overlay',
         kind: 'hls',
         status: 'running',
         progress: { completed: 0, total: 10, bytes: 0 },
       });
-      return { ok: true };
+      return { ok: true, id: 'job_overlay' };
     case 'scan':
     case 'clear-media':
     case 'clear-jobs':

@@ -1,5 +1,5 @@
 // Parser HLS: master playlist, media playlist, kunci AES, byte-range.
-import { parseM3U8, sortVariants, variantLabel } from '../src/lib/m3u8.js';
+import { parseM3U8, sortVariants, variantLabel, collectMediaHosts } from '../src/lib/m3u8.js';
 
 export default async function run({ check }) {
   const master = `#EXTM3U
@@ -71,4 +71,11 @@ big.ts
 
   const empty = parseM3U8('#EXTM3U\n#EXT-X-ENDLIST\n', 'https://x.test/e.m3u8');
   check('playlist kosong tidak melempar error', empty.segments.length === 0);
+
+  const hosts = collectMediaHosts(pl);
+  check('collectMediaHosts: segmen + kunci', hosts.has('cdn.example.com'));
+  check(
+    'collectMediaHosts: varian master',
+    collectMediaHosts(mp).has('cdn.example.com') && collectMediaHosts(mp).size === 1
+  );
 }

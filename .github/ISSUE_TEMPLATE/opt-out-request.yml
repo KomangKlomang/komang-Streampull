@@ -1,0 +1,31 @@
+name: Opt-Out Request
+description: Ask to disable Komang-streampull (KSP) on your website
+title: '[Opt-Out Request] example.com'
+labels: ['opt-out']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We honor verified opt-out requests from site operators. Matching domains
+        are added to the store blocklist in a later release.
+  - type: input
+    id: domain
+    attributes:
+      label: Website domain
+      description: Registrable domain, without path. Example: example.com
+      placeholder: example.com
+    validations:
+      required: true
+  - type: input
+    id: email
+    attributes:
+      label: Contact email
+      description: Used only to verify you represent the site.
+      placeholder: you@example.com
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Optional. Why you want KSP disabled on this domain.

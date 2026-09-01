@@ -1,0 +1,9 @@
+{
+  "name": "com.ksp.ytdlp",
+  "description": "Native Messaging Host for Komang-streampull (yt-dlp live recorder)",
+  "path": "C:\\FULL\\PATH\\TO\\v3-setelah-prd\\native-host\\host.bat",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://YOUR_EXTENSION_ID_HERE/"
+  ]
+}

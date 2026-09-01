@@ -90,7 +90,9 @@ function renderTabs(tabs) {
     const body = el('div', 'tab-card-body');
     body.append(el('div', 'muted', tab.url || ''));
     body.append(el('div', 'muted', `${tab.mediaCount} media · ${tab.diag?.responses || 0} respons`));
-    if (!tab.media.length) {
+    if (tab.blocked) {
+      body.append(el('div', 'media-row', '— daftar opt-out: deteksi dinonaktifkan —'));
+    } else if (!tab.media.length) {
       body.append(el('div', 'media-row', '— tidak ada media —'));
     } else {
       for (const m of tab.media) {

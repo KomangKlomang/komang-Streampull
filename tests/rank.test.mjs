@@ -1,4 +1,4 @@
-import { rankEntries, rankScore } from '../src/lib/rank.js';
+import { pickPrimaryEntry, rankEntries, rankScore } from '../src/lib/rank.js';
 
 export default async function run({ check }) {
   const long = {
@@ -44,4 +44,36 @@ export default async function run({ check }) {
   };
   const videy = rankEntries([page, playingCdn]);
   check('video yang diputar di atas halaman .mp4', videy[0].url === playingCdn.url);
+
+  const fileAd = { url: 'https://cdn.example.com/preroll.mp4', kind: 'file', source: 'network', verified: true, duration: 6 };
+  const hlsMain = {
+    url: 'https://cdn.example.com/main.m3u8',
+    kind: 'hls',
+    source: 'playing',
+    playing: true,
+    verified: true,
+    duration: 600,
+  };
+  check('preview memakai yang diputar, bukan file iklan', pickPrimaryEntry([fileAd, hlsMain])?.url === hlsMain.url);
+
+  const deadMp4 = {
+    url: 'https://pull-fcdn.tiktokcdn.com/stale.mp4?expire=1',
+    kind: 'file',
+    source: 'network',
+    verified: true,
+    duration: 300,
+    lastSeen: Date.now() - 60_000,
+  };
+  const liveHls = {
+    url: 'https://pull-hls.tiktokcdn.com/live.m3u8?expire=999',
+    kind: 'hls',
+    source: 'network',
+    verified: true,
+    duration: 0,
+    lastSeen: Date.now(),
+  };
+  check(
+    'HLS di atas FILE mati (TikTok live)',
+    pickPrimaryEntry([deadMp4, liveHls])?.url === liveHls.url
+  );
 }

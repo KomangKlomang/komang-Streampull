@@ -15,6 +15,7 @@ const panelSettings = $('#panel-settings');
 let activeTab = 'main';
 
 let tabId = null;
+let autoScanned = false;
 let tabUrl = '';
 /** entryId -> hasil probe */
 const probes = new Map();
@@ -181,6 +182,17 @@ function showPreview(res) {
   if (key && key === lastThumbKey) return;
   if (key) lastThumbKey = key;
 
+  const showStill = () => {
+    if (src) {
+      ph.classList.add('hidden');
+      video.removeAttribute('src');
+      video.load();
+      video.poster = src;
+      return;
+    }
+    ph.classList.remove('hidden');
+  };
+
   if (playUrl) {
     ph.classList.add('hidden');
     if (video.getAttribute('src') !== playUrl) video.src = playUrl;
@@ -195,18 +207,13 @@ function showPreview(res) {
     video.addEventListener('loadeddata', freeze, { once: true });
     video.onerror = () => {
       lastThumbKey = null;
-      ph.classList.remove('hidden');
+      showStill();
     };
     video.play().then(() => setTimeout(freeze, 400)).catch(freeze);
     return;
   }
 
-  if (src) {
-    ph.classList.add('hidden');
-    video.removeAttribute('src');
-    video.poster = src;
-    return;
-  }
+  showStill();
 }
 
 function placeholderFrame() {
@@ -319,20 +326,25 @@ function renderEntry(entry, primary = false) {
 
   const actions = el('div', 'item-actions');
 
-  if (entry.drm) {
-    const blocked = btnIcon('CrossCircled', 'ghost icon-btn', 'DRM — tidak bisa diunduh', 'DRM');
-    blocked.disabled = true;
-    actions.append(blocked);
-  } else if (entry.kind === 'hls' || entry.kind === 'dash') {
+  const warnDrm = () =>
+    !entry.drm ||
+    confirm(
+      'Stream ini terlindungi DRM. Berkas mungkin tidak bisa diputar. Anda yakin ingin mengunduh?'
+    );
+
+  if (entry.kind === 'hls' || entry.kind === 'dash') {
     const dl = btnIcon(
       'Download',
       'primary icon-btn',
-      'Unduh kualitas terbaik',
+      entry.drm ? 'Unduh (DRM — mungkin gagal)' : 'Unduh kualitas terbaik',
       primary ? 'Unduh terbaik' : 'Unduh'
     );
-    dl.addEventListener('click', () =>
-      startDownload(entry.id, best?.url || null, best?.label || null, 'engine', best?.size)
-    );
+    dl.addEventListener('click', () => {
+      if (!warnDrm()) return;
+      startDownload(entry.id, best?.url || null, best?.label || null, 'engine', best?.size, {
+        force: entry.drm,
+      });
+    });
     actions.append(dl);
 
     const hasVariants = (probe?.variants?.length || 0) > 1;
@@ -358,12 +370,18 @@ function renderEntry(entry, primary = false) {
     });
     actions.append(q);
   } else if (entry.kind === 'file') {
-    const dl = btnIcon('Download', 'primary icon-btn', 'Unduh file', 'Unduh');
-    dl.addEventListener('click', () => startDownload(entry.id, null, null, 'direct'));
+    const dl = btnIcon('Download', 'primary icon-btn', entry.drm ? 'Unduh (DRM — mungkin gagal)' : 'Unduh file', 'Unduh');
+    dl.addEventListener('click', () => {
+      if (!warnDrm()) return;
+      startDownload(entry.id, null, null, 'direct', null, { force: entry.drm });
+    });
     actions.append(dl);
 
     const alt = btnIcon('Enter', 'ghost icon-btn', 'Unduh via engine jika ditolak server', 'Via engine');
-    alt.addEventListener('click', () => startDownload(entry.id, null, null, 'engine'));
+    alt.addEventListener('click', () => {
+      if (!warnDrm()) return;
+      startDownload(entry.id, null, null, 'engine', null, { force: entry.drm });
+    });
     actions.append(alt);
   }
 
@@ -384,7 +402,13 @@ function renderEntry(entry, primary = false) {
   item.append(actions);
 
   if (probe && !probe.ok) {
-    item.append(el('div', 'note', `Gagal membaca playlist: ${probe.error}`));
+    const hint =
+      entry.kind === 'hls'
+        ? `Info probe: ${probe.error} — unduh live tetap bisa (part digabung otomatis).`
+        : `Gagal membaca playlist: ${probe.error}`;
+    item.append(el('div', 'note', hint));
+  } else if (entry.kind === 'hls' && !probe) {
+    item.append(el('div', 'note', 'Live HLS — part baru digabung otomatis saat rekaman.'));
   }
 
   if (probe?.ok) {
@@ -589,7 +613,7 @@ const probing = new Set();
  */
 async function probePending(media) {
   const pending = media.filter(
-    (e) => (e.kind === 'hls' || e.kind === 'dash') && !probes.has(e.id) && !probing.has(e.id) && e.verified !== false
+    (e) => (e.kind === 'hls' || e.kind === 'dash') && !probes.has(e.id) && !probing.has(e.id)
   );
   for (const entry of pending.slice(0, 3)) {
     probing.add(entry.id);
@@ -674,8 +698,16 @@ async function renderDiagnostics(mediaCount) {
   }
 }
 
-async function startDownload(entryId, variantUrl, label, mode, estimatedBytes) {
-  const res = await send({ cmd: 'download', entryId, variantUrl, label, mode, estimatedBytes });
+async function startDownload(entryId, variantUrl, label, mode, estimatedBytes, opts = {}) {
+  const res = await send({
+    cmd: 'download',
+    entryId,
+    variantUrl,
+    label,
+    mode,
+    estimatedBytes,
+    force: Boolean(opts.force),
+  });
   if (!res?.ok) {
     alert(`Gagal memulai unduhan: ${res?.error || 'tidak diketahui'}`);
   }
@@ -711,7 +743,11 @@ async function refresh() {
     renderBanner('Service worker tidak merespons. Buka chrome://extensions → tombol Errors pada kartu Komang-streampull.');
     return;
   }
-  renderBanner(state.startupErrors?.length ? `Gagal saat start: ${state.startupErrors.join(' | ')}` : '');
+  if (state.blocked) {
+    renderBanner('Situs ini ada di daftar opt-out. Komang-streampull tidak mendeteksi media di halaman ini.');
+  } else {
+    renderBanner(state.startupErrors?.length ? `Gagal saat start: ${state.startupErrors.join(' | ')}` : '');
+  }
 
   const pill = $('#found-pill');
   if (pill) {
@@ -719,7 +755,13 @@ async function refresh() {
     pill.textContent = `${state.media.length} found`;
   }
   const foot = $('#save-foot');
-  if (foot) foot.textContent = `Auto-save → ${state.settings.downloadFolder || 'KSP'}/`;
+  if (foot) {
+    const base = `Auto-save → ${state.settings.downloadFolder || 'KSP'}/`;
+    const needYtdlp = state.media.some((e) => e.kind === 'hls') && !state.ytdlpReady;
+    foot.textContent = needYtdlp
+      ? `${base} · Live: daftarkan native-host/yt-dlp (lihat native-host/)`
+      : base;
+  }
 
   if (!$('#preview-player')?.getAttribute('src')) showPreview({ thumb: state.thumb });
   void verifyPending(state.media).then(() => probePending(state.media));
@@ -752,6 +794,15 @@ async function refresh() {
   if (activeTab === 'main') {
     renderMedia(state.media);
     void renderDiagnostics(state.media.length);
+    if (!state.media.length && !autoScanned && tabId && tabUrl.startsWith('http')) {
+      autoScanned = true;
+      void send({ cmd: 'scan' }).then(() => {
+        setTimeout(() => {
+          lastRender = '';
+          refresh();
+        }, 900);
+      });
+    }
   } else if (activeTab === 'history') {
     renderHistory(state.history);
   } else if (activeTab === 'settings') {
