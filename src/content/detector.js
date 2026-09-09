@@ -358,6 +358,7 @@ import { resolveSocialMedia } from '../lib/social-fetch.js';
   }
 
   function startOverlay() {
+    if (/instagram\.com/i.test(location.hostname)) return;
     if (!isSocialPage()) return;
     syncOverlays();
     const mo = new MutationObserver(() => {

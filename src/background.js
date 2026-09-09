@@ -10,6 +10,7 @@ import {
   storyMediaRole,
 } from './lib/story-scrape.js';
 import { normalizeIgVideoUrl } from './lib/social-fetch.js';
+import { handleIgDownload } from './ig/ig-handler.js';
 import { parseM3U8, sortVariants, variantLabel, collectMediaHosts } from './lib/m3u8.js';
 import { dashLabel, dashVariantUrl, parseMpd, collectDashHosts } from './lib/mpd.js';
 import { fetchText } from './lib/net.js';
@@ -2004,6 +2005,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           /* frame tanpa content script */
         }
         sendResponse({ ok: true });
+        return;
+      }
+      case 'ig-download': {
+        try {
+          const id = await handleIgDownload(msg, sender, {
+            saveJob,
+            startDirectDownload,
+            newJobId,
+            headersForDownload,
+            headerMemo,
+            downloadFilename,
+          });
+          sendResponse({ ok: true, id });
+        } catch (err) {
+          sendResponse({ ok: false, error: String(err?.message || err) });
+        }
         return;
       }
       case 'overlay-download': {

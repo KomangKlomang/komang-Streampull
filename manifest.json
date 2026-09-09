@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Komang-streampull (KSP)",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "Detect and download HLS, DASH, and MP4 streams from the current tab — for media you have the right to save.",
   "minimum_chrome_version": "116",
 
@@ -71,6 +71,20 @@
       "run_at": "document_start",
       "type": "module",
       "js": ["src/content/detector.js"]
+    },
+    {
+      "matches": ["*://*.instagram.com/*"],
+      "all_frames": true,
+      "run_at": "document_idle",
+      "world": "MAIN",
+      "js": ["src/ig/ig-react.js"]
+    },
+    {
+      "matches": ["*://*.instagram.com/*"],
+      "all_frames": true,
+      "run_at": "document_idle",
+      "type": "module",
+      "js": ["src/ig/ig-content.js"]
     }
   ]
 }

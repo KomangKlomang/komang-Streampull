@@ -83,6 +83,19 @@ export default defineConfig({
             all_frames: true,
             match_about_blank: true,
           },
+          {
+            matches: ['*://*.instagram.com/*'],
+            js: ['content-scripts/ig-react.js'],
+            run_at: 'document_idle',
+            all_frames: true,
+            world: 'MAIN',
+          },
+          {
+            matches: ['*://*.instagram.com/*'],
+            js: ['content-scripts/ig-ui.js'],
+            run_at: 'document_idle',
+            all_frames: true,
+          },
         ];
       }
     },
