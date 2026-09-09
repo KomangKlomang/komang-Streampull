@@ -4,6 +4,7 @@ import http from 'node:http';
 import nodeCrypto from 'node:crypto';
 import { downloadDash, downloadFile, downloadHls } from '../src/lib/downloader.js';
 import { downloadRanged, probeRange } from '../src/lib/accel.js';
+import { fetchBytes } from '../src/lib/net.js';
 import { MemorySink } from '../src/lib/sink.js';
 
 const memSink = ({ mime } = {}) => new MemorySink(mime || 'video/mp4');
@@ -36,8 +37,15 @@ export default async function run({ check }) {
 
   const routes = new Map();
   routes.set('/key.bin', KEY);
+  routes.set('/flaky-key.bin', KEY);
   plain.forEach((p, i) => routes.set('/seg' + i + '.ts', encPadded(p)));
   routes.set('/nopad.ts', encRaw(unpadded));
+
+  // Segmen live sengaja dibuat lambat agar paralelismenya bisa diamati.
+  let segDelay = 0;
+  let segInFlight = 0;
+  let segPeak = 0;
+  let liveParPolls = 0;
 
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -93,11 +101,51 @@ export default async function run({ check }) {
 
     const hit = routes.get(p);
     if (hit) {
-      res.writeHead(200, {
-        'content-type': 'application/octet-stream',
-        'content-length': hit.length,
-      });
-      res.end(hit);
+      const send = () => {
+        res.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-length': hit.length,
+        });
+        res.end(hit);
+      };
+      if (segDelay && /^\/seg\d+\.ts$/.test(p)) {
+        segInFlight++;
+        segPeak = Math.max(segPeak, segInFlight);
+        setTimeout(() => {
+          segInFlight--;
+          send();
+        }, segDelay);
+        return;
+      }
+      send();
+      return;
+    }
+
+    if (p === '/livepar.m3u8' || p === '/flaky.m3u8') {
+      const origin = 'http://127.0.0.1:' + server.address().port;
+      const ivHex = '0x' + IV.toString('hex');
+      let body;
+      if (p === '/flaky.m3u8') {
+        body =
+          '#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXT-X-KEY:METHOD=AES-128,URI="' +
+          origin +
+          '/flaky-key.bin",IV=' +
+          ivHex +
+          '\n#EXTINF:10,\nseg0.ts\n#EXT-X-ENDLIST\n';
+      } else {
+        // Poll pertama masih live; poll kedua sudah ENDLIST agar tes cepat selesai.
+        const done = liveParPolls++ > 0;
+        body =
+          '#EXTM3U\n#EXT-X-TARGETDURATION:1\n#EXT-X-KEY:METHOD=AES-128,URI="' +
+          origin +
+          '/key.bin",IV=' +
+          ivHex +
+          '\n' +
+          plain.map((_, i) => '#EXTINF:10,\nseg' + i + '.ts\n').join('') +
+          (done ? '#EXT-X-ENDLIST\n' : '');
+      }
+      res.writeHead(200, { 'content-type': 'application/vnd.apple.mpegurl' });
+      res.end(body);
       return;
     }
 
@@ -202,6 +250,51 @@ export default async function run({ check }) {
     check(
       'live hanya snapshot segmen saat klik',
       live.warnings.some((w) => /live/i.test(w))
+    );
+
+    // --------------------------------------------- live: ambil paralel, tulis urut ---
+    segDelay = 120;
+    segPeak = 0;
+    const livePar = await downloadHls({
+      url: base + '/livepar.m3u8',
+      concurrency: 4,
+      sinkFactory: memSink,
+    });
+    segDelay = 0;
+    const parGot = Buffer.from(await livePar.blob.arrayBuffer());
+    check('live: hasil gabungan tetap berurutan', parGot.equals(Buffer.concat(plain)), parGot.length + ' vs ' + want.length);
+    check('live: segmen diambil bersamaan', segPeak >= 2, 'puncak ' + segPeak);
+
+    // ------------------------------------- kunci AES yang gagal tidak dikunci cache ---
+    let keyFails = 1;
+    const flakyBytes = async (u, o) => {
+      if (u.endsWith('/flaky-key.bin') && keyFails > 0) {
+        keyFails--;
+        throw new Error('koneksi kunci putus');
+      }
+      return fetchBytes(u, o);
+    };
+    let keyErr = null;
+    try {
+      await downloadHls({
+        url: base + '/flaky.m3u8',
+        concurrency: 1,
+        sinkFactory: memSink,
+        fetchBytes: flakyBytes,
+      });
+    } catch (err) {
+      keyErr = err;
+    }
+    check('kunci AES gagal menggagalkan unduhan', !!keyErr);
+    const keyRetry = await downloadHls({
+      url: base + '/flaky.m3u8',
+      concurrency: 1,
+      sinkFactory: memSink,
+      fetchBytes: flakyBytes,
+    });
+    check(
+      'percobaan ulang memakai kunci baru, bukan cache yang gagal',
+      Buffer.from(await keyRetry.blob.arrayBuffer()).equals(plain[0])
     );
 
     // ---------------------------------------------------------- probe Range ---

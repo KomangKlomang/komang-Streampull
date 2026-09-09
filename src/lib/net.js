@@ -41,7 +41,16 @@ export async function fetchWithRetry(url, opts = {}) {
         cache: 'no-store',
         redirect: 'follow',
       });
-      if (!res.ok) throw new HttpError(res.status, url);
+      if (!res.ok) {
+        // Bodi error yang tidak dibaca menahan koneksi sampai GC — dengan
+        // retry berlapis itu menumpuk cepat.
+        try {
+          await res.body?.cancel();
+        } catch {
+          /* sudah tertutup */
+        }
+        throw new HttpError(res.status, url);
+      }
       return res;
     } catch (err) {
       lastErr = err;

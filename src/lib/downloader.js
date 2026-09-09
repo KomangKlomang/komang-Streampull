@@ -23,8 +23,16 @@ async function loadKey(url, opts) {
     }
     return crypto.subtle.importKey('raw', raw, { name: 'AES-CBC' }, false, ['decrypt', 'encrypt']);
   })();
-  keyCache.set(url, promise);
-  return promise;
+  // Kegagalan sesaat tidak boleh dikunci selamanya — segmen berikutnya harus
+  // boleh mencoba lagi, bukan mewarisi promise yang sudah ditolak.
+  keyCache.set(
+    url,
+    promise.catch((err) => {
+      keyCache.delete(url);
+      throw err;
+    })
+  );
+  return keyCache.get(url);
 }
 
 function ivForSegment(seg) {
@@ -105,6 +113,7 @@ export async function downloadHls(job) {
       onProgress,
       sinkFactory,
       pauseGate,
+      concurrency,
       liveMaxMs: job.liveMaxMs,
       fetchText: fetchTextFn,
       fetchBytes: fetchBytesFn,
@@ -251,6 +260,7 @@ async function downloadHlsLive({
   onProgress,
   sinkFactory,
   pauseGate,
+  concurrency = 6,
   liveMaxMs = 0,
   fetchText: fetchTextFn = fetchText,
   fetchBytes: fetchBytesFn = fetchBytes,
@@ -301,6 +311,9 @@ async function downloadHlsLive({
 
   const seen = new Set();
   const meter = new SpeedMeter();
+  // Segmen live hanya bertahan sebentar di playlist; mengambil satu per satu
+  // membuat rekaman tertinggal dan segmen tergeser keluar sebelum sempat diunduh.
+  const fetchWindow = Math.max(1, Math.min(concurrency, 6));
   let completed = 0;
   let idlePolls = 0;
   const started = Date.now();
@@ -325,22 +338,72 @@ async function downloadHlsLive({
     while (!signal?.aborted && (!hasCap || Date.now() - started < liveMaxMs)) {
       await pauseGate.wait(signal);
       let added = 0;
+
+      const fresh = [];
       for (const seg of playlist.segments) {
         const id = `${seg.seq}\0${seg.url}\0${seg.byterange?.offset ?? ''}`;
         if (seen.has(id)) continue;
         seen.add(id);
-        try {
-          const data = await fetchHlsSegment(seg, signal, fetchBytesFn);
-          meter.add(data.byteLength);
-          await sink.append(data);
-          completed++;
-          added++;
-          report();
-        } catch (err) {
-          if (/404|403|410|HTTP/i.test(String(err?.message || err))) continue;
-          throw err;
-        }
+        fresh.push(seg);
       }
+
+      if (fresh.length) {
+        const results = new Array(fresh.length);
+        const fatal = [];
+        let cursor = 0;
+        let writeIndex = 0;
+
+        // Urutan tulis harus tetap sesuai playlist walau selesainya acak.
+        const drain = async () => {
+          while (writeIndex < fresh.length && results[writeIndex] !== undefined) {
+            const data = results[writeIndex];
+            results[writeIndex] = undefined; // lepas referensi agar bisa di-GC
+            writeIndex++;
+            if (data === null) continue; // segmen hilang di CDN — dilewati
+            await sink.append(data);
+            completed++;
+            added++;
+            report();
+          }
+        };
+        let drainChain = Promise.resolve();
+        const scheduleDrain = () => {
+          drainChain = drainChain.then(drain, drain);
+          return drainChain;
+        };
+
+        const pump = async () => {
+          for (;;) {
+            if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+            if (fatal.length) return;
+            await pauseGate.wait(signal);
+            const i = cursor++;
+            if (i >= fresh.length) return;
+            try {
+              const data = await fetchHlsSegment(fresh[i], signal, fetchBytesFn);
+              meter.add(data.byteLength);
+              results[i] = data;
+            } catch (err) {
+              if (!/404|403|410|HTTP/i.test(String(err?.message || err))) {
+                fatal.push(err);
+                return;
+              }
+              results[i] = null;
+            }
+            await scheduleDrain();
+          }
+        };
+
+        // allSettled: semua pump wajib berhenti sebelum sink disentuh lagi.
+        const settled = await Promise.allSettled(
+          Array.from({ length: Math.min(fetchWindow, fresh.length) }, pump)
+        );
+        await scheduleDrain();
+        if (fatal.length) throw fatal[0];
+        const rejected = settled.find((r) => r.status === 'rejected');
+        if (rejected) throw rejected.reason;
+      }
+
       if (!playlist.live && completed > 0) break;
       if (added === 0) {
         idlePolls++;

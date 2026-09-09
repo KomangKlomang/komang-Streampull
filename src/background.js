@@ -8,6 +8,7 @@ import { dashLabel, dashVariantUrl, parseMpd, collectDashHosts } from './lib/mpd
 import { fetchText } from './lib/net.js';
 import { pickPrimaryEntry, rankEntries } from './lib/rank.js';
 import { analyzeHlsUrl, collapseMediaForDisplay, hlsBasePath, hlsStableId, isJunkHls } from './lib/hls-score.js';
+import { buildHostRules, catchAllRule, createRuleIdPool, headerOps } from './lib/dnr.js';
 import { pingYtdlp, recordWithYtdlp } from './lib/ytdlp.js';
 import {
   hostOf,
@@ -15,6 +16,7 @@ import {
   kindFromUrl,
   isNonMediaContentType,
   looksLikeHtml,
+  lruSet,
   mediaUrlsFromPlayerHtml,
   preferPlayerMediaUrl,
   originOf,
@@ -49,6 +51,8 @@ const jobs = new Map();
 const headerMemo = new Map();
 /** Header persis saat URL .m3u8 pertama kali terlihat — pola m3u8-grabber. */
 const urlHeaderMemo = new Map();
+const HEADER_MEMO_MAX = 400; // sejalan dengan batas yang dipakai schedulePersist
+const URL_MEMO_MAX = 300;
 /** tabId -> pratinjau video { dataUrl|url, width, height, duration } — memori saja. */
 const thumbs = new Map();
 let previewRuleId = null;
@@ -543,8 +547,10 @@ function memoHeaders(d) {
   if (!referer && !cookie) return;
 
   const rec = { referer, origin, userAgent, cookie };
-  headerMemo.set(host, rec);
-  if (/\.m3u8(?:[?#]|$)/i.test(d.url)) urlHeaderMemo.set(d.url, rec);
+  lruSet(headerMemo, host, rec, HEADER_MEMO_MAX);
+  // Kunci di sini adalah URL bertanda tangan yang selalu berganti, jadi tanpa
+  // batas Map ini tumbuh terus selama service worker hidup.
+  if (/\.m3u8(?:[?#]|$)/i.test(d.url)) lruSet(urlHeaderMemo, d.url, rec, URL_MEMO_MAX);
   schedulePersist();
 
   // MV3 tidak mendukung extraHeaders — ambil Cookie lewat chrome.cookies API.
@@ -580,9 +586,10 @@ function indexTab(tab) {
   if (tab.url && /^https?:/.test(tab.url)) tabPage.set(tab.id, tab.url);
 }
 
+// Pengindeksan saat tab berubah ikut menumpang di listener tabs.onUpdated di
+// bawah: urutannya penting, prev harus terbaca sebelum tabPage ditimpa.
 safe('tabs index', () => {
   chrome.tabs.query({}).then((tabs) => tabs.forEach(indexTab)).catch(() => {});
-  chrome.tabs.onUpdated.addListener((_id, _info, tab) => indexTab(tab));
 });
 
 /** Pure: dipisah agar bisa diuji tanpa API chrome. */
@@ -687,124 +694,77 @@ function navBase(url) {
 }
 
 safe('tabs.onUpdated', () =>
-  chrome.tabs.onUpdated.addListener((tabId, info) => {
-    if (info.status !== 'loading' || !info.url) return;
+  chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
+    // tab.url sudah berisi alamat baru saat status 'loading', jadi halaman
+    // sebelumnya harus dicatat dulu sebelum indexTab menimpanya.
     const prev = tabPage.get(tabId);
+    indexTab(tab);
+    if (info.status !== 'loading' || !info.url) return;
     if (prev && navBase(prev) === navBase(info.url)) return;
     clearTab(tabId);
   })
 );
-safe('tabs.onRemoved', () => chrome.tabs.onRemoved.addListener((tabId) => clearTab(tabId)));
+safe('tabs.onRemoved', () =>
+  chrome.tabs.onRemoved.addListener((tabId) => {
+    clearTab(tabId);
+    // Keduanya sengaja tidak ikut clearTab: harus bertahan melewati navigasi,
+    // dan baru benar-benar usang saat tabnya tutup.
+    tabPage.delete(tabId);
+    for (const [origin, id] of originToTab) if (id === tabId) originToTab.delete(origin);
+  })
+);
 
 // --------------------------------------------------- header spoofing (DNR) ---
 
-let ruleSeq = 1;
-const RULE_ID_MIN = 20000;
-const RULE_ID_MAX = 29000;
-
-function nextRuleId() {
-  ruleSeq = ruleSeq >= RULE_ID_MAX - RULE_ID_MIN ? 1 : ruleSeq + 1;
-  return RULE_ID_MIN + ruleSeq;
-}
+const nextRuleId = createRuleIdPool();
 
 /**
  * Pasang aturan yang menulis ulang Referer/Origin/Cookie untuk permintaan
  * yang berasal dari extension sendiri (tabId -1), bukan dari tab manapun.
+ *
+ * Chrome menolak seluruh batch kalau header Cookie tidak diterima, jadi
+ * batch yang sama dikirim ulang tanpa Cookie — bukan satu host per giliran.
  */
-async function addHeaderRuleForHost(host, headers = {}) {
-  if (!host) return null;
-
-  const build = (withCookie) => {
-    const requestHeaders = [];
-    if (headers.referer) requestHeaders.push({ header: 'referer', operation: 'set', value: headers.referer });
-    if (headers.origin) requestHeaders.push({ header: 'origin', operation: 'set', value: headers.origin });
-    if (headers.userAgent) requestHeaders.push({ header: 'user-agent', operation: 'set', value: headers.userAgent });
-    if (withCookie && headers.cookie) requestHeaders.push({ header: 'cookie', operation: 'set', value: headers.cookie });
-    return requestHeaders;
-  };
-
+async function commitRules(makeRules) {
   for (const withCookie of [true, false]) {
-    const requestHeaders = build(withCookie);
-    if (!requestHeaders.length) return null;
-    const id = nextRuleId();
-    const rule = {
-      id,
-      priority: 100,
-      action: { type: 'modifyHeaders', requestHeaders },
-      condition: {
-        urlFilter: `||${host}`,
-        tabIds: [chrome.tabs.TAB_ID_NONE],
-      },
-    };
+    const rules = makeRules({ withCookie });
+    if (!rules.length) return [];
     try {
       await chrome.declarativeNetRequest.updateSessionRules({
-        removeRuleIds: [id],
-        addRules: [rule],
+        removeRuleIds: rules.map((r) => r.id),
+        addRules: rules,
       });
-      return id;
+      return rules.map((r) => r.id);
     } catch (err) {
       if (!withCookie) {
         console.warn('[KSP] gagal memasang aturan header:', err);
-        return null;
+        return [];
       }
     }
   }
-  return null;
+  return [];
+}
+
+/** Semua host dipasang dalam satu panggilan, bukan satu round-trip per host. */
+async function addHeaderRules(hosts, headers = {}) {
+  return commitRules((opts) => buildHostRules(hosts, headers, nextRuleId, opts));
 }
 
 async function addHeaderRule(url, headers = {}) {
-  return addHeaderRuleForHost(hostOf(url), headers);
-}
-
-async function addHeaderRules(hosts, headers = {}) {
-  const ids = [];
-  for (const host of [...new Set(hosts.filter(Boolean))]) {
-    const id = await addHeaderRuleForHost(host, headers);
-    if (id != null) ids.push(id);
-  }
-  return ids;
+  const host = hostOf(url);
+  if (!host) return null;
+  const [id] = await addHeaderRules([host], headers);
+  return id ?? null;
 }
 
 /** Semua fetch extension (offscreen) dapat Referer halaman — menutupi CDN tak terduga. */
 // ponytail: konflik referer jika banyak job engine paralel beda tab; naikkan queueConcurrency hati-hati.
 async function addCatchAllHeaderRule(headers = {}) {
-  const build = (withCookie) => {
-    const requestHeaders = [];
-    if (headers.referer) requestHeaders.push({ header: 'referer', operation: 'set', value: headers.referer });
-    if (headers.origin) requestHeaders.push({ header: 'origin', operation: 'set', value: headers.origin });
-    if (headers.userAgent) requestHeaders.push({ header: 'user-agent', operation: 'set', value: headers.userAgent });
-    if (withCookie && headers.cookie) requestHeaders.push({ header: 'cookie', operation: 'set', value: headers.cookie });
-    return requestHeaders;
-  };
-
-  for (const withCookie of [true, false]) {
-    const requestHeaders = build(withCookie);
-    if (!requestHeaders.length) return null;
-    const id = nextRuleId();
-    const rule = {
-      id,
-      priority: 110,
-      action: { type: 'modifyHeaders', requestHeaders },
-      condition: {
-        regexFilter: '^https?://',
-        tabIds: [chrome.tabs.TAB_ID_NONE],
-        resourceTypes: ['xmlhttprequest', 'media', 'other'],
-      },
-    };
-    try {
-      await chrome.declarativeNetRequest.updateSessionRules({
-        removeRuleIds: [id],
-        addRules: [rule],
-      });
-      return id;
-    } catch (err) {
-      if (!withCookie) {
-        console.warn('[KSP] catch-all header rule gagal:', err);
-        return null;
-      }
-    }
-  }
-  return null;
+  const [id] = await commitRules((opts) => {
+    const requestHeaders = headerOps(headers, opts);
+    return requestHeaders.length ? [catchAllRule(nextRuleId(), requestHeaders)] : [];
+  });
+  return id ?? null;
 }
 
 async function tabFetchViaTab(tabId, { url, mode, byterange }) {
@@ -922,23 +882,25 @@ async function estimatePlaylistBytes(playlist) {
     ? segs.map((_, i) => i)
     : [0.25, 0.5, 0.75].map((f) => Math.floor(segs.length * f));
 
+  const sampled = [...new Set(picks)].map((i) => segs[i]).filter(Boolean);
+  // Sampelnya saling bebas — ambil bersamaan supaya popup tidak menunggu
+  // tiga round-trip berurutan sebelum bisa menampilkan ukuran.
+  const sizes = await Promise.all(sampled.map((seg) => remoteSize(seg.url)));
+
   let sampledBytes = 0;
   let sampledSeconds = 0;
-  for (const i of [...new Set(picks)]) {
-    const seg = segs[i];
-    if (!seg) continue;
-    const size = await remoteSize(seg.url);
-    if (!size) continue;
+  sizes.forEach((size, i) => {
+    if (!size) return;
     sampledBytes += size;
-    sampledSeconds += seg.duration || 0;
-  }
+    sampledSeconds += sampled[i].duration || 0;
+  });
   if (!sampledBytes) return 0;
 
   // Durasi segmen bisa berbeda-beda, jadi hitung lewat laju, bukan rata-rata per segmen.
   if (sampledSeconds > 0 && playlist.duration > 0) {
     return Math.round((sampledBytes / sampledSeconds) * playlist.duration);
   }
-  const perSegment = sampledBytes / [...new Set(picks)].length;
+  const perSegment = sampledBytes / sampled.length;
   return Math.round(perSegment * segs.length);
 }
 
@@ -977,16 +939,25 @@ function mergeCookieHeader(existing, cookies) {
 /** Lengkapi Cookie dari chrome.cookies — CDN + halaman asal (TikTok session di tiktok.com). */
 async function headersForDownload(entry, targetUrl = entry.url) {
   const headers = headersFor(entry, targetUrl);
-  const bases = [targetUrl, entry.pageUrl, entry.frameUrl, headers.referer].filter(Boolean);
+  const bases = [
+    ...new Set([targetUrl, entry.pageUrl, entry.frameUrl, headers.referer].filter(Boolean)),
+  ];
+  // Kueri dijalankan bersamaan, tapi penggabungan tetap mengikuti urutan bases
+  // karena cookie pertama untuk sebuah nama yang menang.
+  const jars = await Promise.all(
+    bases.map(async (base) => {
+      try {
+        const url = /^https?:/.test(base) ? base : `https://${base}`;
+        return await chrome.cookies.getAll({ url });
+      } catch {
+        return [];
+      }
+    })
+  );
+
   let merged = headers.cookie || '';
-  for (const base of [...new Set(bases)]) {
-    try {
-      const url = /^https?:/.test(base) ? base : `https://${base}`;
-      const cookies = await chrome.cookies.getAll({ url });
-      if (cookies.length) merged = mergeCookieHeader(merged, cookies);
-    } catch {
-      /* abaikan */
-    }
+  for (const cookies of jars) {
+    if (cookies.length) merged = mergeCookieHeader(merged, cookies);
   }
   if (merged) headers.cookie = merged;
   return headers;
@@ -1036,6 +1007,7 @@ async function probeDash(entry) {
     if (best?.resolution) entry.resolution = best.resolution;
     entry.duration = mpd.duration;
     entry.probed = true;
+    entry.live = Boolean(mpd.live);
     schedulePersist();
     return {
       ok: true,
@@ -1043,6 +1015,7 @@ async function probeDash(entry) {
       variants,
       segments: best?.segments || 0,
       duration: mpd.duration,
+      live: Boolean(mpd.live),
       headers,
       warnings,
     };
@@ -1355,8 +1328,12 @@ async function startDownload({ entryId, tabId, variantUrl, label, mode, estimate
     tabId,
     url: targetUrl,
     kind: entry.kind,
+    // yt-dlp hanya untuk rekaman live. HLS VOD tetap lewat engine supaya
+    // kualitas yang dipilih di popup benar-benar dipakai — yt-dlp selalu 'best'.
+    // entry.live baru diketahui setelah probe; selama masih undefined kita
+    // anggap live, seperti perilaku sebelumnya.
     mode:
-      entry.kind === 'hls' && settings.ytdlpLive !== false
+      entry.kind === 'hls' && settings.ytdlpLive !== false && entry.live !== false
         ? 'ytdlp'
         : mode || (entry.kind === 'file' ? 'direct' : 'engine'),
     nameBase,
@@ -1722,6 +1699,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             let variants = [];
             let duration = pl.duration;
             let segments = pl.segments.length;
+            let live = pl.live;
 
             if (pl.isMaster && pl.variants.length) {
               const sorted = sortVariants(pl.variants);
@@ -1729,6 +1707,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               const topPlaylist = parseM3U8(await pullText(top.url), top.url);
               duration = topPlaylist.duration;
               segments = topPlaylist.segments.length;
+              live = topPlaylist.live;
               if (topPlaylist.live) warnings.push('Playlist live/berjalan.');
 
               const measured = await estimatePlaylistBytes(topPlaylist);
@@ -1777,6 +1756,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             }
             entry.duration = duration;
             entry.probed = true;
+            entry.live = Boolean(live);
             schedulePersist();
 
             sendResponse({
@@ -1785,6 +1765,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               variants,
               segments,
               duration,
+              live: Boolean(live),
               headers,
               warnings,
             });
