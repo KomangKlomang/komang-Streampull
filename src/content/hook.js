@@ -500,7 +500,57 @@
     reportAll(joinConcats(text), `${source}:concat`);
   }
 
+  /** URL mp4 progressive dari React internal IG — pola Story Saver instagram-video.js */
+  function extractIgReactVideoUrl() {
+    try {
+      const videos = document.querySelectorAll('video');
+      for (let i = videos.length - 1; i >= 0; i--) {
+        const v = videos[i];
+        if (!v.offsetHeight) continue;
+        let reactKey = '';
+        for (const k of Object.keys(v)) {
+          if (k.includes('__reactFiber')) {
+            reactKey = k.split('__reactFiber')[1];
+            break;
+          }
+        }
+        if (!reactKey) continue;
+        const root = v.parentElement?.parentElement?.parentElement?.parentElement;
+        const props = root?.[`__reactProps${reactKey}`];
+        const fiber = v[`__reactFiber${reactKey}`];
+        const candidates = [
+          props?.children?.props?.children?.props?.implementations?.[0]?.data?.hdSrc,
+          props?.children?.[0]?.props?.children?.props?.implementations?.[1]?.data?.hdSrc,
+          props?.children?.props?.children?.props?.implementations?.[0]?.data?.sdSrc,
+          props?.children?.[0]?.props?.children?.props?.implementations?.[1]?.data?.sdSrc,
+          props?.children?.props?.children?.props?.implementations?.[1]?.data?.hdSrc,
+          props?.children?.props?.children?.props?.implementations?.[1]?.data?.sdSrc,
+          fiber?.return?.stateNode?.props?.videoData?.$1?.hd_src,
+          fiber?.return?.stateNode?.props?.videoData?.$1?.sd_src,
+        ];
+        for (const u of candidates) {
+          if (typeof u === 'string' && /^https?:/i.test(u)) return u;
+        }
+      }
+    } catch {
+      /* abaikan */
+    }
+    return '';
+  }
+
+  function syncIgStoryVideo() {
+    if (!/\/stories\//.test(location.pathname)) return;
+    try {
+      const url = extractIgReactVideoUrl();
+      document.head.setAttribute('SSvideoURL', url || 'null');
+      if (url) report(url, 'ig-react');
+    } catch {
+      /* abaikan */
+    }
+  }
+
   function deepScan() {
+    syncIgStoryVideo();
     try {
       for (const el of document.querySelectorAll('video, source, [data-src], [data-file]')) {
         const vid = el.tagName === 'VIDEO' ? el : el.closest?.('video');
@@ -676,6 +726,19 @@
   // Sapuan otomatis ringan setelah halaman & player sempat memasang diri.
   const autoScans = [1200, 3500, 8000];
   for (const delay of autoScans) setTimeout(deepScan, delay);
+  if (/\/stories\//.test(location.pathname)) {
+    setInterval(syncIgStoryVideo, 1200);
+    try {
+      new MutationObserver(() => syncIgStoryVideo()).observe(document.documentElement, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ['src'],
+      });
+    } catch {
+      /* abaikan */
+    }
+  }
   // Begitu player punya frame pertama, ambil pratinjaunya.
   for (const delay of [2500, 6000]) setTimeout(captureThumb, delay);
   document.addEventListener('DOMContentLoaded', () => setTimeout(deepScan, 300), { once: true });

@@ -1219,7 +1219,7 @@ async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false,
     isSocialHost(hostOf(tabUrl)) || isSocialHost(hostOf(pageUrl)) || isSocialCdnUrl(videoUrl);
   if (social) {
     const want = hint === 'image' ? 'image' : 'video';
-    if (videoUrl && /^https?:/i.test(videoUrl) && storyMediaRole(videoUrl) === want) {
+    if (videoUrl && /^https?:/i.test(videoUrl) && isSocialCdnUrl(videoUrl)) {
       addEntry({
         url: videoUrl,
         kind: 'file',
@@ -1228,6 +1228,16 @@ async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false,
         source: 'playing',
         playing: true,
       });
+      const direct = [...(registry.get(tabId)?.values() || [])].find((e) => e.url === videoUrl);
+      if (direct) {
+        return startDownload({
+          entryId: direct.id,
+          tabId,
+          mode: 'direct',
+          force: true,
+          nameBase: nameBase || undefined,
+        });
+      }
     }
     const entry = pickStoryEntry([...(registry.get(tabId)?.values() || [])], want);
     if (!entry) {

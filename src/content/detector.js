@@ -221,9 +221,12 @@ import { resolveSocialMedia } from '../lib/social-fetch.js';
     btn.style.opacity = '0.7';
     const hint = el.tagName === 'IMG' ? 'image' : 'video';
     let videoUrl = mediaSrc(el);
+    if (/^blob:|^data:/i.test(videoUrl)) videoUrl = '';
     let nameBase = '';
     if (isSocialPage()) {
       try {
+        window.postMessage({ channel: 'GOVIDEO_CMD', cmd: 'deep-scan' }, '*');
+        await new Promise((r) => setTimeout(r, 350));
         const resolved = await resolveSocialMedia({
           pageUrl: location.href,
           hint,

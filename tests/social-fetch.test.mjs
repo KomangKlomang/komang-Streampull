@@ -2,6 +2,7 @@ import {
   extractStoryItemMedia,
   normalizeIgVideoUrl,
   pickIgStoryItem,
+  readCsrfFromDocument,
 } from '../src/lib/social-fetch.js';
 
 export default function ({ check }) {
@@ -20,4 +21,8 @@ export default function ({ check }) {
     { id: 'abc123', video_versions: [{ url: 'https://x/b.mp4' }] },
   ];
   check('pickIgStoryItem by id', pickIgStoryItem(items, 'abc123', '')?.id === 'abc123');
+  check(
+    'readCsrfFromDocument cookie',
+    readCsrfFromDocument({ cookie: 'a=1; csrftoken=xyz99; b=2' }) === 'xyz99'
+  );
 }

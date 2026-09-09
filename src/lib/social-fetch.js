@@ -9,6 +9,17 @@ export function readCsrfFromHtml(html) {
   return m ? m[1] : '';
 }
 
+export function readCsrfFromDocument(doc) {
+  if (!doc) return '';
+  try {
+    const fromCookie = /(?:^|;\s*)csrftoken=([^;]+)/i.exec(doc.cookie || '');
+    if (fromCookie) return decodeURIComponent(fromCookie[1]);
+  } catch {
+    /* abaikan */
+  }
+  return readCsrfFromHtml(doc.documentElement?.outerHTML || '');
+}
+
 export function normalizeIgMediaUrl(url) {
   return String(url || '')
     .replace(/\\u0026/g, '&')
@@ -184,10 +195,28 @@ export async function resolveSocialMedia({
   }
 
   if (ctx?.platform === 'ig' && /\/stories\//.test(pageUrl)) {
-    const csrf = readCsrfFromHtml(doc.documentElement?.outerHTML || '');
+    const csrf = readCsrfFromDocument(doc);
     const username = ctx.channel;
     const storyId =
       ctx.postId && ctx.postId !== 'story' && ctx.postId !== username ? ctx.postId : '';
+
+    if (want === 'video') {
+      try {
+        const ssUrl = doc.head?.getAttribute?.('SSvideoURL');
+        if (ssUrl && ssUrl !== 'null') {
+          const normalized = normalizeIgVideoUrl(ssUrl);
+          if (normalized && isSocialCdnUrl(normalized)) {
+            return {
+              url: normalized,
+              mediaType: 'video',
+              nameBase: filenameFromCtx({ ...ctx, postId: storyId || 'story' }, 1, 'video'),
+            };
+          }
+        }
+      } catch {
+        /* abaikan */
+      }
+    }
 
     if (want === 'image') {
       const img = bestVisibleImageUrl(doc);
@@ -202,22 +231,6 @@ export async function resolveSocialMedia({
           ),
         };
       }
-    }
-
-    try {
-      const ssUrl = doc.head?.getAttribute?.('SSvideoURL');
-      if (ssUrl && ssUrl !== 'null' && want === 'video') {
-        const normalized = normalizeIgVideoUrl(ssUrl);
-        if (normalized && isSocialCdnUrl(normalized)) {
-          return {
-            url: normalized,
-            mediaType: 'video',
-            nameBase: filenameFromCtx({ ...ctx, postId: storyId || 'story' }, 1, 'video'),
-          };
-        }
-      }
-    } catch {
-      /* abaikan */
     }
 
     if (username && username !== 'highlights' && username !== 'highlight') {

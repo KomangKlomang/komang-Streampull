@@ -1,6 +1,6 @@
 {
   "name": "Komang-streampull",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Komang-streampull (KSP) — deteksi & unduh stream video dari tab aktif",
   "private": true,
   "type": "module",
