@@ -2,7 +2,14 @@
 
 import { isBlockedUrl } from './lib/blocklist.js';
 import { scrapeMediaInPage } from './lib/dom-scrape.js';
-import { isSocialCdnUrl, isSocialHost, pickStoryEntry, storyMediaRole } from './lib/story-scrape.js';
+import {
+  isDirectIgVideoUrl,
+  isSocialCdnUrl,
+  isSocialHost,
+  pickStoryEntry,
+  storyMediaRole,
+} from './lib/story-scrape.js';
+import { normalizeIgVideoUrl } from './lib/social-fetch.js';
 import { parseM3U8, sortVariants, variantLabel, collectMediaHosts } from './lib/m3u8.js';
 import { dashLabel, dashVariantUrl, parseMpd, collectDashHosts } from './lib/mpd.js';
 import { fetchText } from './lib/net.js';
@@ -1210,6 +1217,39 @@ async function peekSocialHead(url) {
   }
 }
 
+/** Jalur Story Saver: unduh langsung URL yang sudah pasti — tanpa pilih dari registry. */
+async function downloadSocialDirect(tabId, url, pageUrl, nameBase) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  const page = pageUrl || tab?.url || url;
+  const target = storyMediaRole(url) === 'video' ? normalizeIgVideoUrl(url) : url;
+  if (storyMediaRole(target) === 'video' && !isDirectIgVideoUrl(target)) {
+    throw new Error('URL video tidak valid (segment audio). Putar story, lalu klik lagi.');
+  }
+  const headers = await headersForDownload(
+    { url: target, pageUrl: page, frameUrl: page, headers: headerMemo.get(target) || {} },
+    target
+  );
+  const job = {
+    id: newJobId(),
+    tabId,
+    url: target,
+    kind: 'file',
+    mode: 'direct',
+    nameBase:
+      nameBase ||
+      sanitizeFilename(tab?.title || hostOf(page), storyMediaRole(target) === 'image' ? 'photo' : 'story'),
+    status: 'pending',
+    startedAt: Date.now(),
+    estimatedBytes: 0,
+    progress: { completed: 0, total: 0, bytes: 0 },
+    warnings: [],
+    headers,
+  };
+  saveJob(job);
+  await startDirectDownload(job);
+  return job.id;
+}
+
 async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false, hint = '', nameBase = '') {
   const tabUrl = (await tabPageUrl(tabId)) || pageUrl;
   if (!force && (isBlockedUrl(tabUrl) || isBlockedUrl(pageUrl) || isBlockedUrl(videoUrl))) {
@@ -1220,36 +1260,16 @@ async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false,
   if (social) {
     const want = hint === 'image' ? 'image' : 'video';
     if (videoUrl && /^https?:/i.test(videoUrl) && isSocialCdnUrl(videoUrl)) {
-      addEntry({
-        url: videoUrl,
-        kind: 'file',
-        tabId,
-        pageUrl: pageUrl || tabUrl,
-        source: 'playing',
-        playing: true,
-      });
-      const direct = [...(registry.get(tabId)?.values() || [])].find((e) => e.url === videoUrl);
-      if (direct) {
-        return startDownload({
-          entryId: direct.id,
-          tabId,
-          mode: 'direct',
-          force: true,
-          nameBase: nameBase || undefined,
-        });
+      const role = storyMediaRole(videoUrl);
+      if (want === 'image' ? role === 'image' : isDirectIgVideoUrl(normalizeIgVideoUrl(videoUrl))) {
+        return downloadSocialDirect(tabId, videoUrl, pageUrl || tabUrl, nameBase);
       }
     }
     const entry = pickStoryEntry([...(registry.get(tabId)?.values() || [])], want);
     if (!entry) {
       throw new Error('Belum ada URL media asli. Buka/putar story sampai jalan, lalu klik lagi.');
     }
-    return startDownload({
-      entryId: entry.id,
-      tabId,
-      mode: 'direct',
-      force: true,
-      nameBase: nameBase || undefined,
-    });
+    return downloadSocialDirect(tabId, entry.url, pageUrl || tabUrl, nameBase);
   }
   if (videoUrl && /^https?:/i.test(videoUrl)) {
     const kind = kindFromUrl(videoUrl) || (isSocialCdnUrl(videoUrl) ? 'file' : null);

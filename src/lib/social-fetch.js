@@ -1,7 +1,7 @@
 // Resolver media sosial (IG story API, WA DOM) — pola Story Saver, tanpa extractor per-situs penuh.
 
 import { igFetchHeaders } from './ig-media.js';
-import { isSocialCdnUrl, storyMediaRole } from './story-scrape.js';
+import { isDirectIgVideoUrl, isSocialCdnUrl, storyMediaRole } from './story-scrape.js';
 import { buildSocialFilename, parseSocialPageContext } from './social-filename.js';
 
 export function readCsrfFromHtml(html) {
@@ -167,12 +167,17 @@ export async function resolveSocialMedia({
 
   const role = url ? storyMediaRole(url) : '';
   if (url && isSocialCdnUrl(url) && role && (want === 'image' ? role === 'image' : role === 'video')) {
-    if (role === 'video') url = normalizeIgVideoUrl(url);
-    return {
-      url,
-      mediaType: role,
-      nameBase: filenameFromCtx(ctx, 1, role),
-    };
+    if (role === 'video') {
+      url = normalizeIgVideoUrl(url);
+      if (!isDirectIgVideoUrl(url)) url = '';
+    }
+    if (url) {
+      return {
+        url,
+        mediaType: role,
+        nameBase: filenameFromCtx(ctx, 1, role),
+      };
+    }
   }
 
   if (!doc) return url && isSocialCdnUrl(url) ? { url, mediaType: role || want, nameBase: '' } : null;
@@ -244,15 +249,21 @@ export async function resolveSocialMedia({
           const order = Math.max(1, items.indexOf(item) + 1);
           const media = extractStoryItemMedia(item);
           if (media?.url) {
-            return {
-              url: media.url,
-              mediaType: media.mediaType,
-              nameBase: filenameFromCtx(
-                { ...ctx, postId: storyId || 'story' },
-                order,
-                media.mediaType
-              ),
-            };
+            const outUrl =
+              media.mediaType === 'video' ? normalizeIgVideoUrl(media.url) : media.url;
+            if (media.mediaType === 'video' && !isDirectIgVideoUrl(outUrl)) {
+              /* API kadang mengembalikan segment — lewati */
+            } else {
+              return {
+                url: outUrl,
+                mediaType: media.mediaType,
+                nameBase: filenameFromCtx(
+                  { ...ctx, postId: storyId || 'story' },
+                  order,
+                  media.mediaType
+                ),
+              };
+            }
           }
         }
       } catch {

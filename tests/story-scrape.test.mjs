@@ -1,5 +1,7 @@
 import {
   harvestStoryMedia,
+  isBadIgVideoPart,
+  isDirectIgVideoUrl,
   isSocialCdnUrl,
   isStoryMediaUrl,
   pickStoryEntry,
@@ -69,4 +71,23 @@ export default function ({ check }) {
     shouldHarvestStoryJson('{"video_versions":[{"url":"https://scontent.cdninstagram.com/v/t50/x.mp4","width":1}]}')
   );
   check('JSON biasa dilewati', !shouldHarvestStoryJson('{"ok":true}'));
+  check(
+    'segment audio ditolak',
+    isBadIgVideoPart('https://video.cdninstagram.com/v/t16/audio_dashinit.mp4')
+  );
+  check('mp4 progressive diterima', isDirectIgVideoUrl(igVideo));
+  check(
+    'pickStoryEntry buang audio-only',
+    pickStoryEntry(
+      [
+        {
+          url: 'https://video.cdninstagram.com/v/t16/audio_dashinit.mp4',
+          lastSeen: 99,
+          size: 9e6,
+        },
+        { url: igVideo, lastSeen: 1, size: 1e6 },
+      ],
+      'video'
+    )?.url === igVideo
+  );
 }

@@ -33,6 +33,54 @@ export function isStoryMediaUrl(url) {
   return false;
 }
 
+/** Segment DASH audio-only / init — unduhan ini cuma suara, tanpa gambar (PotPlayer error). */
+export function isBadIgVideoPart(url) {
+  let raw = String(url || '')
+    .replace(/\\u0026/g, '&')
+    .replace(/&amp;/g, '&');
+  try {
+    const parsed = new URL(raw);
+    const path = decodeURIComponent(parsed.pathname || '');
+    const tag = parsed.searchParams.get('tag') || '';
+    const efg = parsed.searchParams.get('efg') || '';
+    if (efg) {
+      try {
+        const decoded = atob(efg.replace(/-/g, '+').replace(/_/g, '/'));
+        if (/audio/i.test(decoded)) return true;
+      } catch {
+        /* abaikan */
+      }
+    }
+    return /dashinit|init\.mp4|(?:^|[_\/.-])audio(?:[_\/.-]|$)|audio_dashinit|_audio_/i.test(
+      `${path} ${tag}`
+    );
+  } catch {
+    return /dashinit|init\.mp4|(?:^|[_\/.-])audio(?:[_\/.-]|$)|audio_dashinit|_audio_/i.test(raw);
+  }
+}
+
+/** Mp4 progressive IG/FB yang aman diunduh — bukan blob, bukan segment audio. */
+export function isDirectIgVideoUrl(url) {
+  let raw = String(url || '')
+    .replace(/\\u0026/g, '&')
+    .replace(/&amp;/g, '&');
+  try {
+    const parsed = new URL(raw);
+    for (const key of ['bytestart', 'byteend', 'range']) parsed.searchParams.delete(key);
+    raw = parsed.toString();
+  } catch {
+    raw = raw
+      .replace(/([?&])(?:bytestart|byteend|range)=[^&]+/gi, '$1')
+      .replace(/[?&]+$/, '');
+  }
+  return (
+    !!raw &&
+    !/^blob:/i.test(raw) &&
+    !isBadIgVideoPart(raw) &&
+    (/\.(?:mp4|m4v)(?:[?#]|$)/i.test(raw) || /video\.[^/]+fbcdn\.net/i.test(raw))
+  );
+}
+
 /** video vs image — blob/MSE bukan ini; yang itu sampah. */
 export function storyMediaRole(url) {
   if (!isStoryMediaUrl(url)) return '';
@@ -50,7 +98,9 @@ export function storyMediaRole(url) {
 }
 
 export function pickStoryEntry(entries, hint) {
-  const list = [...(entries || [])].filter((e) => isStoryMediaUrl(e?.url));
+  const list = [...(entries || [])]
+    .filter((e) => isStoryMediaUrl(e?.url))
+    .filter((e) => storyMediaRole(e.url) !== 'video' || isDirectIgVideoUrl(e.url));
   const want = hint === 'image' ? 'image' : hint === 'video' ? 'video' : '';
   let pool = want ? list.filter((e) => storyMediaRole(e.url) === want) : list;
   if (!pool.length && want === 'video') return null;
