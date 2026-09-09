@@ -1210,7 +1210,7 @@ async function peekSocialHead(url) {
   }
 }
 
-async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false, hint = '') {
+async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false, hint = '', nameBase = '') {
   const tabUrl = (await tabPageUrl(tabId)) || pageUrl;
   if (!force && (isBlockedUrl(tabUrl) || isBlockedUrl(pageUrl) || isBlockedUrl(videoUrl))) {
     throw new Error('Situs ini ada di daftar opt-out. Unduhan dinonaktifkan.');
@@ -1238,6 +1238,7 @@ async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false,
       tabId,
       mode: 'direct',
       force: true,
+      nameBase: nameBase || undefined,
     });
   }
   if (videoUrl && /^https?:/i.test(videoUrl)) {
@@ -1258,6 +1259,7 @@ async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false,
           tabId,
           mode: hit.kind === 'file' ? 'direct' : 'engine',
           force,
+          nameBase: nameBase || undefined,
         });
       }
     }
@@ -1269,10 +1271,11 @@ async function startDownloadFromOverlay(tabId, videoUrl, pageUrl, force = false,
     tabId,
     mode: entry.kind === 'file' ? 'direct' : 'engine',
     force,
+    nameBase: nameBase || undefined,
   });
 }
 
-async function startDownload({ entryId, tabId, variantUrl, label, mode, estimatedBytes, force }) {
+async function startDownload({ entryId, tabId, variantUrl, label, mode, estimatedBytes, force, nameBase: nameOverride }) {
   const entry = registry.get(tabId)?.get(entryId);
   if (!entry) throw new Error('Media tidak ditemukan lagi — muat ulang halaman.');
   const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -1320,7 +1323,7 @@ async function startDownload({ entryId, tabId, variantUrl, label, mode, estimate
     tab?.title || entry.pageTitle || hostOf(entry.frameUrl || entry.url),
     'video'
   );
-  const nameBase = label ? `${base} [${label}]` : base;
+  const nameBase = nameOverride || (label ? `${base} [${label}]` : base);
 
   const job = {
     id: newJobId(),
@@ -1981,7 +1984,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             msg.videoUrl,
             msg.pageUrl || sender.tab?.url || '',
             Boolean(msg.force),
-            msg.hint || ''
+            msg.hint || '',
+            msg.nameBase || ''
           );
           sendResponse({ ok: true, id });
         } catch (err) {

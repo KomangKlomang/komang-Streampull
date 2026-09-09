@@ -1,6 +1,8 @@
 // Berjalan di isolated world. Menjembatani temuan dari hook.js (MAIN world)
 // ke service worker, dan meneruskan perintah scan/play dari popup.
 
+import { resolveSocialMedia } from '../lib/social-fetch.js';
+
 (() => {
   'use strict';
   if (window.__kspDetector) return;
@@ -214,15 +216,33 @@
     return el.currentSrc || el.src || el.getAttribute?.('src') || '';
   }
 
-  function sendOverlayDownload(el, btn, force) {
+  async function sendOverlayDownload(el, btn, force) {
     btn.dataset.busy = '1';
     btn.style.opacity = '0.7';
+    const hint = el.tagName === 'IMG' ? 'image' : 'video';
+    let videoUrl = mediaSrc(el);
+    let nameBase = '';
+    if (isSocialPage()) {
+      try {
+        const resolved = await resolveSocialMedia({
+          pageUrl: location.href,
+          hint,
+          videoUrl,
+          document,
+        });
+        if (resolved?.url) videoUrl = resolved.url;
+        if (resolved?.nameBase) nameBase = resolved.nameBase;
+      } catch {
+        /* pakai URL dari elemen / registry */
+      }
+    }
     chrome.runtime.sendMessage(
       {
         cmd: 'overlay-download',
-        videoUrl: mediaSrc(el),
+        videoUrl,
+        nameBase,
         pageUrl: location.href,
-        hint: el.tagName === 'IMG' ? 'image' : 'video',
+        hint,
         force: Boolean(force),
       },
       (res) => {
